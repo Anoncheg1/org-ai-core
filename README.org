@@ -1,0 +1,23 @@
+* org-aire
+Refactored org-ai Emacs package to integrate LLMs APIs to Org mode.
+
+* Manual
+
+Checkout this repository.
+
+: git clone https://github.com/rksm/org-ai
+
+#+begin_src elisp :results none :exports code :eval no
+(add-to-list 'load-path "path/to/org-ai")
+(require 'org)
+(require 'org-ai)
+(add-hook 'org-mode-hook #'org-ai-mode)
+(org-ai-global-mode)
+(setq org-ai-default-chat-model "gpt-4") ; if you are on the gpt-4 beta:
+#+end_src
+* TODO debugging
+To get full request body and more information set:
+: (setopt org-ai-debug-mode t)
+
+Built-in url.el have ability to output request and resonse headers, for that you need to set
+: (setq url-debug '(http))

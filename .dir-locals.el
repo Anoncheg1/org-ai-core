@@ -1,0 +1,11 @@
+((emacs-lisp-mode . (
+                    (outline-regexp . "^;;;")
+                    ;; (eval . (outline-minor-mode 1))
+                    (eval . (progn (keymap-local-set "C-c k" #'outline-previous-heading)
+                                  (keymap-local-set "C-c n" #'outline-next-heading)
+                                  (keymap-local-set "C-c C-e" #'my/outline-hide-other)
+                                  (keymap-local-set "C-<tab>" #'outline-cycle-buffer)
+                                  (keymap-local-set "<backtab>" #'outline-toggle-children)
+                                  (outline-cycle-buffer 1)
+                                  ))
+                    )))
