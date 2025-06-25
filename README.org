@@ -1,10 +1,17 @@
 * org-aire
 Refactored org-ai Emacs package to integrate LLMs APIs to Org mode.
 
-* Manual
+* Supported services
+- OpenAI
+- Azure-OpenAI
+- Perplexity.ai
+- Anthropic
+- DeepSeek
+- Google
+- Together
 
-Checkout this repository.
-
+org-ai-service file:org-aire/org-ai-openai.el:164
+* Configuration
 : git clone https://github.com/rksm/org-ai
 
 #+begin_src elisp :results none :exports code :eval no
@@ -12,12 +19,105 @@ Checkout this repository.
 (require 'org)
 (require 'org-ai)
 (add-hook 'org-mode-hook #'org-ai-mode)
-(org-ai-global-mode)
-(setq org-ai-default-chat-model "gpt-4") ; if you are on the gpt-4 beta:
+(setq org-ai-openai-api-token "xxx")
 #+end_src
-* TODO debugging
+** How to use not supported service?
+Redefine functions: org-ai--openai-get-token-auth-source, org-ai--get-endpoint, org-ai--get-headers
+* Supported “[AI]:” in-text prefixes
+- SYS-EVERYWHERE
+- SYS - role: system
+- AI - role: assistant
+- AI_REASON - excluded
+- ME - role: user
+
+* Supported parameteres for #+begin_ai
+- :model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free" - string
+- :max-tokens 150 - int
+- :stream nil - bool/string
+- :top-p
+- :temperature
+- :frequency-penalty
+- :presence-penalty
+- :service
+- :service together - symbol (org-ai-service)
+- :sys-everywhere - string (sys-prompt-for-all-messages) file:org-aire/org-ai.el:131
+- :chat :completion (org-ai--request-type) file:org-aire/org-ai-block.el:93
+
+file:org-aire/org-ai-openai.el:467 (org-ai-stream-completion function)
+* debugging
 To get full request body and more information set:
 : (setopt org-ai-debug-mode t)
 
 Built-in url.el have ability to output request and resonse headers, for that you need to set
 : (setq url-debug '(http))
+* Extension guide
+** How to add post-processing for text
+There are a hook ~org-ai-after-chat-insertion-hook~ that accpet two arguments (par1 par2)
+- par1: text/role/stop - symbol
+- par2: string of chunk
+
+
+For stream:
+#+begin_src text
+par1:
+role
+par2:
+assistant
+
+par1:
+text
+par2:
+A
+
+par1:
+text
+par2:
+ question
+
+par1:
+end
+par2:
+
+#+end_src
+
+
+Example1:
+- file:/home/g/sources/org-ai/org-ai-talk.el::131
+
+Example2 “Remove empty lines”:
+
+#+begin_src elisp :results none :exports code :eval no
+(require 'org-ai-expand-block)
+
+(defun my/ai-postprocess (type content)
+  (if (equal type 'end)
+      (let* ((context (org-ai-special-block))
+             (con-beg (org-element-property :contents-begin context))
+             (con-end (org-element-property :contents-end context)))
+        (org-ai-remove-distant-empty-lines con-beg con-end)))
+  )
+
+(add-hook 'org-ai-after-chat-insertion-hook #'my/ai-postprocess)
+#+end_src
+
+
+Note: text this text located between org-ai--current-insert-position-marker (point-marker) in current buffer.
+
+** org-block functions
+- org-in-src-block-p = org-ai-special-block
+* Tests
+#+begin_ai :max-tokens 150 :service together :model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
+How to live long?
+#+end_ai
+
+#+begin_ai :stream nil :max-tokens 150 :service together :model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
+How to live long?
+#+end_ai
+
+#+begin_ai :completion :max-tokens 150 :service together :model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
+How to live long?
+#+end_ai
+
+#+begin_ai :stream nil :completion :max-tokens 150 :service together :model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
+How to live long?
+#+end_ai

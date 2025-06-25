@@ -27,13 +27,17 @@
 ;; - TODO: remove org-ai-block, org, org-element
 ;; - TODO: rename all functions to convention.
 ;; - TODO: rename file to -api.el
-;; - TODO: make stream optional.
+;; - DONE: add :stream nil
 ;; - TODO: make default role system optional.
-;; - TODO: BUG: :completion req-type don't output anything
+;; - DONE: BUG: :completion req-type don't output anything
+;; - DONE: `org-ai-after-chat-insertion-hook' not called for :stream nil and :completion
+;; - DONE: hook errors handling at user side.
+;; - DONE: stop timer when "When no connection"
 
 ;;; Commentary:
 
-;; This file contains the OpenAI API related functions for org-ai.
+;; Get info block from #begin_ai and call url-retrieve. Asynchronous
+;; but only one call per buffer.
 ;;
 ;; Interface function: "org-ai-stream-completion".
 ;;
@@ -222,6 +226,14 @@ For chat completion responses.")
 (defvar org-ai--current-progress-timer nil
   "Timer for updating the progress reporter for non-streamed responses to make them less boring.")
 
+(defvar org-ai--current-progress-timer-remaining-ticks 0
+  "The time when the timer started.")
+
+(defcustom org-ai-progress-duration 10
+  "The total duration in seconds for which the timer should run."
+  :type 'integer
+  :group 'org-ai)
+
 (defvar org-ai-after-chat-insertion-hook nil
   "Hook that is called when a chat response is inserted.
 Note this is called for every stream response so it will typically
@@ -290,21 +302,31 @@ Returns the prettified JSON string."
 
 
 (defun org-ai--debug (&rest args)
+  "If firt argument of args is a stringwith %s than behave like format.
+Otherwise format every to string and concatenate."
   (when (and org-ai-debug-buffer args)
-    (let ((string
-           (apply #'concat (mapcar (lambda (arg)
-                                     (if (equal (type-of arg) 'string)
-                                         (format "%s\n" arg)
-                                       (concat (prin1-to-string arg) "\n"))
-                                     ) args)))
-          (buf-exist (get-buffer org-ai-debug-buffer)))
+    (let ((buf-exist (get-buffer org-ai-debug-buffer)))
       (with-current-buffer (or buf-exist (get-buffer-create org-ai-debug-buffer))
         (if buf-exist ; was not created
             (goto-char (point-max)))
-        (insert string)
-        ;; (newline)
-        ))))
 
+        (if (and (equal (type-of (car args)) 'string)
+                 (string-match "%s" (car args)))
+            (progn
+              (insert (apply 'format (car args) (cdr args)))
+              (newline))
+
+          ;; else
+          (insert (apply #'concat (mapcar (lambda (arg)
+                                            (if (equal (type-of arg) 'string)
+                                                (format "%s\n" arg)
+                                              (concat (prin1-to-string arg) "\n"))
+                                            ) args)))
+        ;; (newline)
+        )))))
+
+;; (org-ai--debug "test %s" 2)
+;; (org-ai--debug "test" 2 3 "sd")
 
 (defun org-ai--debug-urllib (source-buf)
   (when org-ai-debug-buffer
@@ -435,44 +457,56 @@ whether messages are provided."
          `(("Authorization" . ,(encode-coding-string (string-join `("Bearer" ,(org-ai--openai-get-token service)) " ") 'utf-8))))))))
 
 ;;; - main
-(cl-defun org-ai-stream-completion (&optional &key prompt messages model max-tokens temperature top-p frequency-penalty presence-penalty service context)
+(cl-defun org-ai-stream-completion (&optional &key prompt messages model max-tokens temperature top-p frequency-penalty presence-penalty service context stream)
   "Start a server-sent event stream.
 Called from `org-ai-complete-block' in main file with `PROMPT' or
 `MESSAGES' and `CONTEXT'.
-`PROMPT' is the query for completions `MESSAGES' is the query for
-chatgpt. `MODEL' is the model to use. `MAX-TOKENS' is the maximum
-number of tokens to generate. `TEMPERATURE' is the temperature of
-the distribution. `TOP-P' is the top-p value. `FREQUENCY-PENALTY'
-is the frequency penalty. `PRESENCE-PENALTY' is the presence
-penalty. `CONTEXT' is the context of the special block. Service
-is the ai cloud service such as 'openai or 'azure-openai."
+`PROMPT' is the query for completions.
+`MESSAGES' is the query for chat.
+`MODEL' is the model to use.
+`MAX-TOKENS' is the maximum number of tokens to generate.
+`TEMPERATURE' is the temperature of the distribution.
+`TOP-P' is the top-p value.
+`FREQUENCY-PENALTY' is the frequency penalty.
+`PRESENCE-PENALTY' is the presence penalty.
+`CONTEXT' is the context of the special block.
+`SERVICE' is the AI cloud service such as 'openai or 'azure-openai'.
+`STREAM' indicates whether to stream the response."
   (let* ((context (or context (org-ai-special-block)))
          (buffer (current-buffer))
-         (info (org-ai-get-block-info context)))
-    (print info)
-    (cl-macrolet ((let-with-captured-arg-or-header-or-inherited-property
-                    (definitions &rest body)
-                    `(let ,(cl-loop for (sym . default-form) in definitions
-                                    collect `(,sym (or ,sym
-                                                       (alist-get ,(intern (format ":%s" (symbol-name sym))) info)
-                                                       (when-let ((prop (org-entry-get-with-inheritance ,(symbol-name sym))))
+         (info (org-ai-get-block-info context))) ; ((:max-tokens . 150) (:service . "together") (:model . "xxx"))
+    (org-ai--debug "org-ai-stream-completion info:" info)
+    ;; This macro helps in defining local variables by trying to get their values from:
+    ;; 1. Existing local variable (if passed as argument to the main function)
+    ;; 2. Alist `info` (from Org-AI block header, e.g., :model "gpt-4")
+    ;; 3. Inherited Org property (e.g., #+PROPERTY: model gpt-4)
+    ;; 4. Default form (if provided)
+    (cl-macrolet ((let-with-captured-arg-or-header-or-inherited-property ; NAME
+                    (definitions &rest body) ; ARGLIST
+                    `(let ,(cl-loop for (sym . default-form) in definitions ; BODY
+                                    collect `(,sym (or ,sym ; Try existing variable first
+                                                       (alist-get ,(intern (format ":%s" (symbol-name sym))) info) ; Then from Org-AI block info
+                                                       (when-let ((prop (org-entry-get-with-inheritance ,(symbol-name sym)))) ; Then from inherited Org property
+                                                         ;; --- Conversion Logic for Parameters ---
                                                          (if (eq (quote ,sym) 'model)
                                                              prop
                                                            (if (stringp prop) (string-to-number prop) prop)))
                                                        ,@default-form)))
                        ,@body)))
+      ;; FORM
       (let-with-captured-arg-or-header-or-inherited-property
        ((model (if messages org-ai-default-chat-model org-ai-default-completion-model))
-        (max-tokens org-ai-default-max-tokens)
+        (max-tokens org-ai-default-max-tokens) ; int
         (top-p)
         (temperature)
         (frequency-penalty)
         (presence-penalty)
-        (service)
-        ;; (stream)
+        (service) ; string
+        (stream) ; bool
         )
        (let ((callback (cond
                         (messages (lambda (result) (org-ai--insert-stream-response context buffer result t)))
+                        ; prompt, req-type = completion
                         (t (lambda (result) (org-ai--insert-single-response context buffer result))))))
          (org-ai-stream-request :prompt prompt
                                 :messages messages
@@ -483,7 +517,8 @@ is the ai cloud service such as 'openai or 'azure-openai."
                                 :frequency-penalty frequency-penalty
                                 :presence-penalty presence-penalty
                                 :service service
-                                :callback callback))))))
+                                :callback callback
+                                :stream stream))))))
 ;; Together.xyz 2025
 ;; '(id "nz7KyaB-3NKUce-9539d1912ce8b148" object "chat.completion" created 1750575101 model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free" prompt []
 ;;   choices [(finish_reason "length" seed 3309196889559996400 logprobs nil index 0
@@ -491,7 +526,9 @@ is the ai cloud service such as 'openai or 'azure-openai."
 
 
 (defun org-ai--insert-single-response (context buffer &optional response)
-  "Insert the response from the OpenAI API into the buffer.
+  "For Completion LLM mode.
+Used as callback for `org-ai-stream-request'.
+Insert the response from the OpenAI API into #+begin_ai block.
 `CONTEXT' is the context of the special block. `BUFFER' is the
 buffer to insert the response into. `RESPONSE' is the response
 from the OpenAI API."
@@ -499,12 +536,8 @@ from the OpenAI API."
                  "context:" context
                  "response:" response)
   (when response
-    (org-ai--debug "wtf0")
     (if-let ((error (plist-get response 'error)))
         (if-let ((message (plist-get error 'message))) (error message) (error error))
-      ;; else
-      ;; (org-ai--debug "wtf1" (plist-get response 'choices))
-      ;; (org-ai--debug "wtf1" (aref (plist-get response 'choices) 0))
       (if-let* ((choice (aref (plist-get response 'choices) 0))
                 (text (or (plist-get choice 'text)
                           ;; Together.xyz way
@@ -517,14 +550,21 @@ from the OpenAI API."
             (push-mark (org-element-property :contents-end context)))
           (let ((pos (or (and org-ai--current-insert-position-marker
                               (marker-position org-ai--current-insert-position-marker))
-                         (org-element-property :contents-end context))))
+                         (org-element-property :contents-end context)))
+                (text-decoded (decode-coding-string text 'utf-8)))
             (save-excursion
               (goto-char pos)
 
               (when (string-suffix-p "#+end_ai" (buffer-substring-no-properties (point) (line-end-position)))
                 (insert "\n")
                 (backward-char))
-              (insert text)
+              (insert text-decoded)
+
+              (condition-case hook-error
+                  (run-hook-with-args 'org-ai-after-chat-insertion-hook 'end text-decoded)
+                (error
+                 (message "Error during \"after-chat-insertion-hook\": %s" hook-error)))
+
               (setq org-ai--current-insert-position-marker (point-marker)))))))))
 
 
@@ -642,9 +682,11 @@ from the OpenAI API."
 
 (defun org-ai--insert-stream-response (context buffer &optional response insert-role)
   "`RESPONSE' is one JSON message of the stream response.
+Used as callback for `org-ai-stream-request'.
 When `RESPONSE' is nil, it means we are done. `CONTEXT' is the
 context of the special block. `BUFFER' is the buffer to insert
 the response into."
+  (org-ai--debug "org-ai--insert-stream-response response:" response)
   (let ((normalized (org-ai--normalize-response response)))
    (cl-loop for response in normalized
             do (let ((type (org-ai--response-type response)))
@@ -682,7 +724,12 @@ the response into."
                                        (insert "\n[ME]: "))
                                       ((string= role "system")
                                        (insert "\n[SYS]: ")))
-                                     (run-hook-with-args 'org-ai-after-chat-insertion-hook 'role role)
+
+                                     (condition-case hook-error
+                                       (run-hook-with-args 'org-ai-after-chat-insertion-hook 'role role)
+                                     (error
+                                      (message "Error during \"after-chat-insertion-hook\": %s" hook-error)))
+
                                      (setq org-ai--current-insert-position-marker (point-marker)))))))
 
                        (text (let ((text (org-ai--response-payload response)))
@@ -699,8 +746,12 @@ the response into."
                                    ;; "auto-fill"
                                    (when (and org-ai-auto-fill (not org-ai--currently-inside-code-markers))
                                      (fill-paragraph))
-                                   ;; hook
-                                   (run-hook-with-args 'org-ai-after-chat-insertion-hook 'text text))
+
+                                   (condition-case hook-error
+                                       (run-hook-with-args 'org-ai-after-chat-insertion-hook 'text text)
+                                     (error
+                                      (message "Error during \"after-chat-insertion-hook\": %s" hook-error)))
+                                   )
                                  (setq org-ai--chat-got-first-response t)
                                  (setq org-ai--current-insert-position-marker (point-marker)))))
 
@@ -715,31 +766,41 @@ the response into."
                                                    (insert text)
                                                    text)
                                                "")))
-                                   (run-hook-with-args 'org-ai-after-chat-insertion-hook 'end text)
+                                   (condition-case hook-error
+                                       (run-hook-with-args 'org-ai-after-chat-insertion-hook 'end text)
+                                     (error
+                                      (message "Error during \"after-chat-insertion-hook\": %s" hook-error)))
                                    (setq org-ai--current-insert-position-marker (point-marker))))
 
                                (org-element-cache-reset)
                                (when org-ai-jump-to-end-of-block (goto-char org-ai--current-insert-position-marker)))))))))
    normalized))
 
-(cl-defun org-ai-stream-request (&optional &key prompt messages model max-tokens temperature top-p frequency-penalty presence-penalty service callback)
-  "Send a request to the OpenAI API.
+(cl-defun org-ai-stream-request (&optional &key prompt messages model max-tokens temperature top-p frequency-penalty presence-penalty service stream callback stream)
+  "Executed by `org-ai-stream-completion'
 `PROMPT' is the query for completions `MESSAGES' is the query for
 chatgpt. `CALLBACK' is the callback function. `MODEL' is the
 model to use. `MAX-TOKENS' is the maximum number of tokens to
 generate. `TEMPERATURE' is the temperature of the distribution.
 `TOP-P' is the top-p value. `FREQUENCY-PENALTY' is the frequency
 penalty. `PRESENCE-PENALTY' is the presence penalty."
+  ;; - `org-ai--insert-stream-response'
   (setq org-ai--current-insert-position-marker nil)
   (setq org-ai--chat-got-first-response nil)
   (setq org-ai--debug-data nil)
   (setq org-ai--debug-data-raw nil)
   (setq org-ai--currently-inside-code-markers nil)
+  ;; - local
   (setq service (or (if (stringp service) (org-ai--read-service-name service) service)
                     (org-ai--service-of-model model)
                     org-ai-service))
-  (setq stream (org-ai--stream-supported service model))
+  (org-ai--debug "org-ai-stream-request stream:" stream (type-of stream))
+  (setq stream (if (and stream (string-equal-ignore-case stream "nil"))
+                   nil
+                 ;; else
+                 (org-ai--stream-supported service model)))
 
+  ;; - HTTP body preparation as a string
   (let* ((url-request-extra-headers (org-ai--get-headers service))
          (url-request-method "POST")
          (endpoint (org-ai--get-endpoint messages service))
@@ -751,36 +812,50 @@ penalty. `PRESENCE-PENALTY' is the presence penalty."
 					    :top-p top-p
 					    :frequency-penalty frequency-penalty
 					    :presence-penalty presence-penalty
-                                            :service service
-                                            :stream stream)))
+					    :service service
+					    :stream stream)))
+    ;; - regex check
     (org-ai--check-model model endpoint) ; not empty and if "api.openai.com" or "openai.azure.com"
 
-    ;; (when org-ai-debug-mode
-    ;; (message "REQUEST %s %s" endpoint url-request-data)
+    (org-ai--debug "org-ai-stream-request endpoint:" endpoint (type-of endpoint)
+                   "org-ai-stream-request request-data:" (org-ai--prettify-json-string url-request-data)
+                   "org-ai-stream-request callback:" callback)
 
+    ;; - `org-ai--url-request-on-change-function', `org-ai-reset-stream-state', `org-ai--current-request-is-streamed'
     (setq org-ai--current-request-is-streamed stream)
+    ;; - `org-ai--url-request-on-change-function' (call) , `org-ai-reset-stream-state' (just set nil)
+    ;; - it is `org-ai--insert-stream-response' or `org-ai--insert-single-response'
     (setq org-ai--current-request-callback callback)
+    ;; - run timer that show /-\ looping
     (when (not stream) (org-ai--progress-reporter-until-request-done))
 
+
+    (org-ai--debug "Main request before, that return a \"urllib buffer\".")
     (setq org-ai--current-request-buffer-for-stream
           (url-retrieve
            endpoint
            (lambda (_events)
+             (org-ai--debug "in url-retrieve callback!!!!!!!!!!." _events)
+
              (with-current-buffer org-ai--current-request-buffer-for-stream
+               (org-ai--debug-urllib org-ai--current-request-buffer-for-stream)
                (org-ai--url-request-on-change-function nil nil nil))
              (org-ai--maybe-show-openai-request-error org-ai--current-request-buffer-for-stream)
              (org-ai-reset-stream-state))))
+    (org-ai--debug "Main request after.")
 
-    ;; (display-buffer-use-some-window org-ai--current-request-buffer-for-stream nil)
-
+    ;; for stream add hook, otherwise remove
     (if stream
         (unless (member 'org-ai--url-request-on-change-function after-change-functions)
           (with-current-buffer org-ai--current-request-buffer-for-stream
             (add-hook 'after-change-functions #'org-ai--url-request-on-change-function nil t)))
+      ;; else - not stream
       (with-current-buffer org-ai--current-request-buffer-for-stream
         (remove-hook 'after-change-functions #'org-ai--url-request-on-change-function t)))
 
+    ;; - return, not used
     org-ai--current-request-buffer-for-stream))
+
 
 (defun org-ai--maybe-show-openai-request-error (request-buffer)
   "If the API request returned an error, show it.
@@ -974,27 +1049,44 @@ and the length in chars of the pre-change text replaced by that range."
   "
 Set
 - `org-ai--current-progress-reporter' - lambda that return a string.
-- `org-ai--current-progress-timer' - timer that
+- `org-ai--current-progress-timer' - timer that output /-\ to echo area.
+- `org-ai--current-progress-timer-remaining-ticks'
 "
   (org-ai--progress-reporter-cancel)
   (setq org-ai--current-progress-reporter (make-progress-reporter "Waiting for a response"))
 
-  (setq org-ai--current-progress-timer
-        (let (
-              ;; (counter 0)
-              (reporter org-ai--current-progress-reporter))
-          (run-with-timer
-           1.0 0.2
-           (lambda ()
-             ;; (setq counter (1+ counter))
-             (progress-reporter-update reporter))))))
+  (let ((repeat-every-sec 0.2))
+    ;; - precalculate ticks based on duration
+    (setq org-ai--current-progress-timer-remaining-ticks
+                (round (/ org-ai-progress-duration repeat-every-sec)))
+    ;; (org-ai--debug "Create timer" org-ai--current-progress-timer-remaining-ticks)
 
-(defun org-ai--progress-reporter-cancel ()
+    ;; - Run timer after 1 sec:
+    (setq org-ai--current-progress-timer
+          (run-with-timer
+           1.0 repeat-every-sec
+           (lambda ()
+             ;; (org-ai--debug "In timer" org-ai--current-progress-timer-remaining-ticks)
+             (if (<= org-ai--current-progress-timer-remaining-ticks 0)
+                 (progn ; failed
+                   (org-ai--progress-reporter-cancel 'failed)
+                   (setq org-ai--current-progress-reporter nil))
+               ;; else
+               (progress-reporter-update org-ai--current-progress-reporter)
+               (setq org-ai--current-progress-timer-remaining-ticks
+                     (1- org-ai--current-progress-timer-remaining-ticks))))))))
+
+(defun org-ai--progress-reporter-cancel (&optional failed)
+  "Stop reporter for not stream."
   (when org-ai--current-progress-reporter
-    (progress-reporter-done org-ai--current-progress-reporter)
+    (if failed
+        (progress-reporter-update org-ai--current-progress-reporter "Connection failed")
+      ;; else
+      (progress-reporter-done org-ai--current-progress-reporter))
     (setq org-ai--current-progress-reporter nil))
   (when org-ai--current-progress-timer
-    (cancel-timer org-ai--current-progress-timer)))
+    (cancel-timer org-ai--current-progress-timer)
+    (setq org-ai--current-progress-timer-remaining-ticks 0)))
 
 (defun org-ai-open-request-buffer ()
   "A debug helper that opens the url request buffer."

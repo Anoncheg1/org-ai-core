@@ -8,7 +8,7 @@
 ;;
 ;; Package-Requires: ((emacs "27.1") (websocket "1.15"))
 
-;; Changes:
+;;; Changes:
 ;; - DONE: remove websocket
 ;; - DONE: additional should be additional
 ;; - TODO: make org-ai-block dependent on org and org-ai-openai dependent on url only
@@ -16,7 +16,12 @@
 ;; - TODO: guide for connecting to custom LLM provider.
 ;; - TODO: separate 'org-ai-block and 'org-ai-openai, for now org-ai-openai dependes on org-ai-block and org.
 ;; - TODO: make org-ai-variable.el and pass them to -api.el functions as parameters.
-
+;; - DONE: :stream nil/t parameter
+;; - TODO: rename "org-ai-stream-completion" to "org-ai-openai-call"
+;; - TODO: where in org-ai-expand-block is it really what will be send? check corectness of roles with json
+;; - TODO: Guide to add custom functions for text post-processing.
+;; - TODO: provide ability to replace url-http with plz or org-ai-openai with llm(plz)
+;;; License
 ;; This file is NOT part of GNU Emacs.
 
 ;; org-ai.el is free software: you can redistribute it and/or modify
@@ -140,6 +145,7 @@ result."
       ;;                                                 default-system-prompt
       ;;                                                 sys-prompt-for-all-messages)
       ;;                                      :context context))
+      ;; by default:
       (t (org-ai-stream-completion :messages (org-ai--collect-chat-messages ; org-ai-openai
                                               content
                                               default-system-prompt
@@ -148,6 +154,7 @@ result."
 
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 ;; -= M-x org-ai-expand-block
+;;;###autoload
 (defun org-ai-expand-block (&optional context)
   "M-x org-ai-expand-block
 Show a temp buffer with what the org-ai block expands to. This is what
@@ -248,7 +255,7 @@ It's designed to \"do the right thing\":
 (defvar org-ai-global-mode-map (make-sparse-keymap)
   "Keymap for `org-ai-global-mode'.")
 
-(define-key org-ai-global-mode-map (kbd "C-c M-a") org-ai-global-prefix-map)
+(define-key org-ai-global-mode-map (kbd "C-c M-a") org-ai-global-prefix-map) ; here
 
 ;;;###autoload
 (define-minor-mode org-ai-global-mode

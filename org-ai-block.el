@@ -20,6 +20,10 @@
 
 ;; Defines functions for dealing with #+begin_ai..#+end_ai special blocks
 
+;;; Changelog
+;; - TODO: rename org-ai-special-block to org-ai-block-p
+;; - DONE: complete is short for completion
+
 ;;; Code:
 
 (require 'org)
@@ -97,6 +101,7 @@ pairs from `org-ai-get-block-info'."
   (cond
    ((not (eql 'x (alist-get :chat info 'x))) 'chat)
    ((not (eql 'x (alist-get :completion info 'x))) 'completion)
+   ((not (eql 'x (alist-get :complete info 'x))) 'completion)
    ((not (eql 'x (alist-get :image info 'x))) 'image)
    ((not (eql 'x (alist-get :sd-image info 'x))) 'sd-image)
    ((not (eql 'x (alist-get :local info 'x))) 'local-chat)
