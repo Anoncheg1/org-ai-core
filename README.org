@@ -1,5 +1,5 @@
-* org-agent
-Refactored org-ai Emacs package to integrate LLMs APIs to Org mode.
+* org-ai-core
+Refactored org-ai Emacs package that provide Org block for communication with LLMs APIs.
 * files
 | File             | Purpose                         |
 |------------------+---------------------------------|
