@@ -11,18 +11,20 @@
 ;;; Changes:
 ;; - DONE: remove websocket
 ;; - DONE: additional should be additional
+;; - DONE: :stream nil/t parameter
+;; - DONE: guide for connecting to custom LLM provider.
+;; - DONE: Guide to add custom functions for text post-processing.
 ;; - TODO: make org-ai-block dependent on org and org-ai-openai dependent on url only
 ;; - TODO: rename all to "file-shit" naming convention
-;; - TODO: guide for connecting to custom LLM provider.
 ;; - TODO: separate 'org-ai-block and 'org-ai-openai, for now org-ai-openai dependes on org-ai-block and org.
 ;; - TODO: make org-ai-variable.el and pass them to -api.el functions as parameters.
-;; - DONE: :stream nil/t parameter
 ;; - TODO: rename "org-ai-stream-completion" to "org-ai-openai-call"
 ;; - TODO: where in org-ai-expand-block is it really what will be send? check corectness of roles with json
-;; - TODO: Guide to add custom functions for text post-processing.
 ;; - TODO: provide ability to replace url-http with plz or org-ai-openai with llm(plz)
 ;; - TODO: Org properties extraction in separate function.
-;;
+;; - TODO: implement "#+PROPERTY: var  foo=1" and  "#+begin_ai :var foo=1" and to past to text in [foo]
+;; - TODO: implement expanders for variables like links and references
+
 ;;; License
 
 ;; This file is NOT part of GNU Emacs.
@@ -50,60 +52,46 @@
 ;; It allows you to:
 ;; - #+begin_ai..#+end_ai blocks for org-mode
 ;; - "chat" with a language model from within an org mode buffer
-;; - generate images
-;; - has support for speech input and output
-;; - various commands usable everywhere
 ;;
 ;; For the Internet connection used built-in libs: url.el and url-http.el.
 ;;
-;; See see https://github.com/rksm/org-ai for the full set of features and setup
-;; instructions.
+;; See see https://github.com/Anoncheg1/org-ai-core for the full set
+;; of features and setup instructions.
 ;;
 ;; Configuration:
-;;
 ;; (add-to-list 'load-path "path/to/org-ai")
-;; (require 'org)
 ;; (require 'org-ai)
-;; (setopt org-ai-default-chat-model "gpt-4") ; org-ai-openai.el
 ;; (add-hook 'org-mode-hook #'org-ai-mode) ; org-ai.el
-;; (org-ai-global-mode) ; org-ai.el
-
+;; (setq org-ai-openai-api-token "xxx") ; org-ai-openai.el
 ;;
-;; You will need an OpenAI API key. It can be stored in the format
+;; You will need an OpenAI API key.  It can be stored in the format
 ;;   machine api.openai.com login org-ai password <your-api-key>
 ;; in your ~/.authinfo.gpg file (or other auth-source) and will be picked up
 ;; when the package is loaded.
 ;;
-;; For the speech input/output setup please see
-;; https://github.com/rksm/org-ai/blob/master/README.md#setting-up-speech-input--output
-;;
 ;; Available commands (TODO to refine):
 ;;
 ;; - Inside org-mode / #+begin_ai..#+end_ai blocks:
-;;     - C-c C-c to send the text to the OpenAI API and insert a response
-;;     - Press C-c <backspace> (org-ai-kill-region-at-point) to remove the chat part under point.
-;;     - org-ai-mark-region-at-point will mark the region at point.
-;;     - org-ai-mark-last-region will mark the last chat part.
-;;
-;; - Speech input/output. Talk with your AI!
-;;     - In org-mode / #+begin_ai..#+end_ai blocks:
-;;       - C-c r to record and transcribe speech via whisper.el in org blocks.
-;;     - Everywhere else:
-;;         - Enable speech input with org-ai-talk-input-toggle for other commands (see below).
-;;     - Enable speech output with org-ai-talk-output-enable. Speech output uses os internal speech synth (macOS) or espeak otherwise.
-;;     - See [Setting up speech input / output](#setting-up-speech-input--output) below for more details.
-;;
-;; - Non-org-mode commands
-;;     - org-ai-on-region: Ask a question about the selected text or tell the AI to do something with it.
-;;     - org-ai-refactor-code: Tell the AI how to change the selected code, a diff buffer will appear with the changes.
-;;     - org-ai-on-project: Query / modify multiple files at once. Will use projectile if available.
-;;     - org-ai-prompt: prompt the user for a text and then print the AI's response in current buffer.
-;;     - org-ai-summarize: Summarize the selected text.
-;;     - org-ai-explain-code: Explain the selected code.
-;;
-;; - org-ai-open-account-usage-page show how much money you burned.
-;; - org-ai-install-yasnippets install snippets for #+begin_ai..#+end_ai blocks.
-;; - org-ai-open-request-buffer for debugging, open the request buffer.
+;;     - C-c C-c to send the text to the OpenAI API and insert a response (org-ai.el)
+;;     - Press C-c <backspace> (org-ai-kill-region-at-point) to remove the chat part under point.  (org-ai-block.el)
+;;     - org-ai-mark-region-at-point will mark the region at point.  (org-ai-block.el)
+;;     - org-ai-mark-last-region will mark the last chat part.  (org-ai-block.el)
+
+;; Architecture:
+;;   (raw info) Interface -> (structured Org info + raw Org body) Agent -> API to LLM + Callback (may be part of Agent or API)
+
+;; Callback write result to ORG
+
+;; Agent - two parts:
+;; 1) receive structured info and pass to "API to LLM"
+;; 2) receive callback and pass back to "API to LLM" to display to user
+
+;; Why callback is not separate? Because of "stream" mode - just for speed
+
+
+;; Interface: (Why chain of calls? To not mess with return structures.)
+;;  - org-ai-interface-step1 (parse Org and messages)
+;;  - org-ai-interface-step2 (parse Org, choose callback)
 
 ;;; Code:
 
@@ -117,55 +105,92 @@
 ;; (require 'org-ai-oobabooga)
 
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+(defcustom org-ai-agent-call #'org-ai-api-request-prepare ; org-ai-openai.el
+  "Pass LLM adjusted information for further agent or LLM's API call.
+TODO: pass callback for writing "
+  :type 'function
+  :group 'org-ai)
+
+
+;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 ;; -= C-c C-c
 (defun org-ai-ctrl-c-ctrl-c ()
-  "C-c C-c command step 1) for #+begin_ai."
-  (when-let ((context (org-ai-special-block))) ; org-ai-block.el
-    (org-ai-complete-block) ; here
+  "Main command for #+begin_ai."
+  (when-let ((element (org-ai-special-block))) ; org-ai-block.el
+    (org-ai-interface-step1) ; here
     t))
 
-(defun org-ai-complete-block ()
-  "C-c C-c command step 2) for #+begin_ai.
-Send the text content to the OpenAI API and replace the block with the
-result."
+
+(defun org-ai-interface-step1 ()
+  "First intefrace step 2) for #+begin_ai.
+Read Org parameters and send the text content to next step."
   (interactive)
-  (let* ((context (org-ai-special-block)) ; org-ai-block.el
-         (info (org-ai-get-block-info context)) ; org-ai-block.el
-         (content (org-ai-get-block-content context)) ; org-ai-block.el
+  ;; -- 1) Org "Pre-parsing"
+  (let* ((element (org-ai-special-block)) ; org-ai-block.el
+         (info (org-ai-get-block-info element)) ; ((:max-tokens . 150) (:service . "together") (:model . "xxx")) ; org-ai-block.el
+         (end-marker (org-ai-block--get-contents-end-marker element))
          (req-type (org-ai--get-request-type info)) ; org-ai-block.el
          (sys-prompt-for-all-messages (or (not (eql 'x (alist-get :sys-everywhere info 'x)))
                                           (org-entry-get-with-inheritance "SYS-EVERYWHERE") ; org
                                           org-ai-default-inject-sys-prompt-for-all-messages)) ; org-ai-openai.el
          (sys-prompt (or (org-entry-get-with-inheritance "SYS") ; org
-                                    (org-ai--get-sys :info info ; org-ai-block.el
-                                                     :default org-ai-default-chat-system-prompt)))) ; org-ai-openai.el variable
-    (cl-case req-type
-      (completion (org-ai-stream-completion :prompt content ; org-ai-openai.el
-                                            :context context))
-      ;; (image (org-ai-create-and-embed-image context)) ; org-ai-openai-image.el
-      ;; (sd-image (org-ai-create-and-embed-sd context)) ; org-ai-sd.el
-      ;; (local-chat (org-ai-oobabooga-stream :messages (org-ai--collect-chat-messages ; org-ai-oobabooga
-      ;;                                                 content
-      ;;                                                 default-system-prompt
-      ;;                                                 sys-prompt-for-all-messages)
-      ;;                                      :context context))
-      ;; by default:
-      (t (org-ai-stream-completion :messages (org-ai--collect-chat-messages ; org-ai-openai
-                                              content
-                                              sys-prompt
-                                              sys-prompt-for-all-messages)
-                                   :context context)))))
+                         (org-ai--get-sys :info info ; org-ai-block.el
+                                          :default org-ai-default-chat-system-prompt)))) ; org-ai-openai.el variable
+    (org-ai--debug info)
+    ;; - Process Org params and call agent
+    (org-ai-block--let-params info
+                              ;; format: (variable optional-default type)
+                              ((service :type identity)
+                               (model (if messages org-ai-default-chat-model org-ai-default-completion-model) :type string) ; org-ai-openai.el
+                               (max-tokens org-ai-default-max-tokens :type number)
+                               (top-p nil :type number)
+                               (temperature nil :type number)
+                               (frequency-penalty nil :type number)
+                               (presence-penalty nil :type number)
+                               (stream "t" :type string))
+                              ;; - body with some Org "Post-parsing":
+                              (let ((content (org-ai-get-block-content element))
+                                    (service (or (if (stringp service) (org-ai--read-service-name service) service) ; org-ai-openai.el
+                                                 ;; (org-ai--service-of-model model)
+                                                 org-ai-service)) ; org-ai-openai.el
+                                    (stream (if (and stream (string-equal-ignore-case stream "nil"))
+                                                nil
+                                              ;; else
+                                              (org-ai--stream-supported service model))))
+                                ;; - main call
+                                (funcall org-ai-agent-call req-type content end-marker sys-prompt sys-prompt-for-all-messages ; message
+                                         model max-tokens top-p temperature frequency-penalty presence-penalty service stream ; model params
+                                         )))))
+
+    ;; ;; -- --
+    ;; (cl-case req-type
+    ;;   (completion (org-ai-interface-step2 :prompt content ; org-ai-openai.el
+    ;;                                         :context context))
+    ;;   ;; (image (org-ai-create-and-embed-image context)) ; org-ai-openai-image.el
+    ;;   ;; (sd-image (org-ai-create-and-embed-sd context)) ; org-ai-sd.el
+    ;;   ;; (local-chat (org-ai-oobabooga-stream :messages (org-ai--collect-chat-messages ; org-ai-oobabooga
+    ;;   ;;                                                 content
+    ;;   ;;                                                 default-system-prompt
+    ;;   ;;                                                 sys-prompt-for-all-messages)
+    ;;   ;;                                      :context context))
+    ;;   ;; by default:
+    ;;   (t (org-ai-interface-step2 :messages (org-ai--collect-chat-messages ; org-ai-openai
+    ;;                                           content
+    ;;                                           sys-prompt
+    ;;                                           sys-prompt-for-all-messages)
+    ;;                                :context context)))))
 
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 ;; -= M-x org-ai-expand-block
 ;;;###autoload
-(defun org-ai-expand-block (&optional context)
-  "M-x org-ai-expand-block
-Show a temp buffer with what the org-ai block expands to. This is what
-will be sent to the api. CONTEXT is the org-ai block."
+(defun org-ai-expand-block (&optional element)
+  "Show a temp buffer with what the org-ai block expands to.
+This is what will be sent to the api.  ELEMENT is the org-ai block.
+Like `org-babel-expand-src-block'."
   (interactive)
-  (let* ((context (or context (org-ai-special-block))) ; org-ai-block.el
-         (expanded (org-ai-get-block-content context))) ; org-ai-block.el
+  (let* ((element (or element (org-ai-special-block))) ; org-ai-block.el
+         (expanded (org-ai-get-block-content element))) ; org-ai-block.el
     (if (called-interactively-p 'any)
         (let ((buf (get-buffer-create "*Org-Ai Preview*")))
           (with-help-window buf (with-current-buffer buf

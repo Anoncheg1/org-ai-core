@@ -6,6 +6,10 @@ Refactored org-ai Emacs package that provide Org block for communication with LL
 | org-ai.el        | minor mode for Org and commands |
 | org-ai-block.el  | handling Org block              |
 | org-ai-openai.el | connections handling            |
+
+Not active:
+- org-ai-excluded-useful-staff.el
+- org-ai-tests.el
 * Supported services
 - OpenAI
 - Azure-OpenAI
@@ -21,13 +25,21 @@ org-ai-service file:org-aire/org-ai-openai.el:164
 
 #+begin_src elisp :results none :exports code :eval no
 (add-to-list 'load-path "path/to/org-ai")
-(require 'org)
 (require 'org-ai)
-(add-hook 'org-mode-hook #'org-ai-mode)
-(setq org-ai-openai-api-token "xxx")
+(add-hook 'org-mode-hook #'org-ai-mode) ; org-ai.el
+(setq org-ai-openai-api-token "xxx") ; org-ai-openai.el
 #+end_src
 ** How to use not supported service?
 Redefine functions: org-ai--openai-get-token-auth-source, org-ai--get-endpoint, org-ai--get-headers
+Set variables:
+#+begin_src elisp :results none :exports code :eval no
+(setq org-ai-endpoints
+      (append org-ai-endpoints
+              '((my-new-host "https://api.mynewhost.com/v1/chat/completions"))))
+;; Optionally, set it as default
+(setq org-ai-service 'my-new-host)
+#+end_src
+
 * Supported “[AI]:” in-text prefixes
 - SYS-EVERYWHERE
 - SYS - role: system

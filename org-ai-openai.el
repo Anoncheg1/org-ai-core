@@ -20,25 +20,28 @@
 ;; If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Changelog:
-;; - comment redundent "org-ai-use-auth-source" variable
-;; - check that it working
-;; - add debug-switch
-;; - TODO: make clear URLs without hardcoding and bunch of variables
-;; - TODO: remove org-ai-block, org, org-element
-;; - TODO: rename all functions to convention.
-;; - TODO: rename file to -api.el
+;; - DONE: comment redundent "org-ai-use-auth-source" variable
+;; - DONE: add debug-switch "org-ai-debug-buffer"
 ;; - DONE: add :stream nil
-;; - TODO: allow to disable role system.
+;; - DOME: allow to disable "system" role completely
 ;; - DONE: BUG: :completion req-type don't output anything
 ;; - DONE: `org-ai-after-chat-insertion-hook' not called for :stream nil and :completion
 ;; - DONE: hook errors handling at user side.
 ;; - DONE: stop timer when "When no connection"
-;; - TODO: shut network process when timer expire - kill buffer, remove callback.
-;; - TODO: rename org-ai-stream-completion to "compose" something
+;; - DONE: shut network process when timer expire - kill buffer, remove callback.
 ;; - DONE: coding is broken for received text for not English languages
-;;; Commentary: encode, timer, interface two steps
+;; - DONE: make URLs as variables without hardcoding in functions and bunch of variables
+;; - DONE: write guide to add new LLM provider
+;; - TODO: remove org-ai-block, org, org-element
+;; - TODO: rename all functions to convention
+;; - TODO: rename file to -api.el
+;; - TODO: rename org-ai-stream-completion to "compose" something
+;; - TODO: split interface to two: one before parsing roles and second after
 
-;; Get info block from #begin_ai and call url-retrieve. Asynchronous
+
+;;; Commentary:
+
+;; Get info block from #begin_ai and call url-retrieve.  Asynchronous
 ;; but only one call per buffer.
 ;;
 ;; Interface function: "org-ai-stream-completion".
@@ -83,7 +86,7 @@
 (defcustom org-ai-openai-api-token ""
   "This is your OpenAI API token.
 You need to specify if you do not store the token in
-`auth-sources'. You can retrieve it at
+`auth-sources'.  You can retrieve it at
 https://platform.openai.com/account/api-keys."
   :type 'string
   :group 'org-ai)
@@ -97,12 +100,12 @@ https://platform.openai.com/account/api-keys."
 ;;   :group 'org-ai)
 
 (defcustom org-ai-default-completion-model "text-davinci-003"
-  "The default model to use for completion requests. See https://platform.openai.com/docs/models for other options."
+  "The default model to use for completion requests.  See https://platform.openai.com/docs/models for other options."
   :type 'string
   :group 'org-ai)
 
 (defcustom org-ai-default-chat-model "gpt-4o-mini"
-  "The default model to use for chat-gpt requests. See https://platform.openai.com/docs/models for other options."
+  "The default model to use for chat-gpt requests.  See https://platform.openai.com/docs/models for other options."
   :type 'string
   :group 'org-ai)
 
@@ -127,20 +130,20 @@ https://platform.openai.com/account/api-keys."
                                 "o3-mini"
                                 "o4-mini"
                                 "chatgpt-4o-latest")
-  "Alist of available chat models. See https://platform.openai.com/docs/models."
+  "Alist of available chat models.  See https://platform.openai.com/docs/models."
   :type '(alist :key-type string :value-type string)
   :group 'org-ai)
 
 (defcustom org-ai-default-max-tokens nil
-  "The default maximum number of tokens to generate. This is what costs money."
+  "The default maximum number of tokens to generate.  This is what costs money."
   :type 'string
   :group 'org-ai)
 
 (defcustom org-ai-default-chat-system-prompt "You are a helpful assistant inside Emacs."
   "The system message helps set the behavior of the assistant:
-https://platform.openai.com/docs/guides/chat/introduction. This
+https://platform.openai.com/docs/guides/chat/introduction.  This
 default prompt is send as the first message before any user (ME)
-or assistant (AI) messages. Inside a +#begin_ai...#+end_ai block
+or assistant (AI) messages.  Inside a +#begin_ai...#+end_ai block
 you can override it with: '[SYS]: <your prompt>'."
   :type 'string
   :group 'org-ai)
@@ -168,7 +171,7 @@ messages."
                         "2023-12-26")
 
 (defcustom org-ai-service 'openai
-  "Service to use."
+  "Service to use if not specified."
   :type '(choice (const :tag "OpenAI" openai)
                  (const :tag "Azure-OpenAI" azure-openai)
                  (const :tag "perplexity.ai" perplexity.ai)
@@ -181,8 +184,6 @@ messages."
 (defvar org-ai-openai-chat-endpoint "https://api.openai.com/v1/chat/completions")
 
 (defvar org-ai-openai-completion-endpoint "https://api.openai.com/v1/completions")
-
-(defvar org-ai-google-chat-endpoint "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
 
 ;; Azure-Openai specific variables
 
@@ -223,7 +224,7 @@ For chat completion responses.")
   "Whether we expect a streamed response or a single completion payload.")
 
 (defvar org-ai--current-progress-reporter nil
-  "progress-reporter for non-streamed responses to make them less boring.")
+  "Progress-reporter for non-streamed responses to make them less boring.")
 
 (defvar org-ai--current-progress-timer nil
   "Timer for updating the progress reporter for non-streamed responses to make them less boring.")
@@ -290,7 +291,8 @@ only contain fragments.")
 (defun org-ai--prettify-json-string (json-string)
   "Convert a compact JSON string to a prettified JSON string.
 This function uses a temporary buffer to perform the prettification.
-Returns the prettified JSON string."
+Returns the prettified JSON string.
+Argument JSON-STRING string with json."
   (condition-case err
       (let* ((parsed-json (json-read-from-string json-string))
              ;; 1. First, encode the JSON object. This will be compact with your json-encode.
@@ -304,6 +306,8 @@ Returns the prettified JSON string."
         (message "Input JSON: %S" json-string))))
 
 (defun org-ai--debug-get-caller()
+  "Return string with name of function of caller function.
+Heavy to execute."
   (let* ((backtrace-line-length 20)
          (print-level 3)
          (print-length 10)
@@ -330,7 +334,7 @@ Returns the prettified JSON string."
          caller))
 
 (defun org-ai--debug (&rest args)
-  "If firt argument of args is a stringwith %s than behave like format.
+  "If firt argument of ARGS is a stringwith %s than behave like format.
 Otherwise format every to string and concatenate."
   (when (and org-ai-debug-buffer args)
     (let* ((buf-exist (get-buffer org-ai-debug-buffer))
@@ -349,7 +353,7 @@ Otherwise format every to string and concatenate."
                 (end-of-buffer nil))
               ;; (recenter '(t))
               ))
-        ;; ;; - output caller function
+        ;; ;; - output caller function ( working, but too heavy)
         ;; (let ((caller
         ;;        (org-ai--debug-get-caller)))
         ;;   (when caller
@@ -376,6 +380,8 @@ Otherwise format every to string and concatenate."
 ;; (org-ai--debug "test" 2 3 "sd")
 
 (defun org-ai--debug-urllib (source-buf)
+  "Copy `url-http' buffer with response to our debugging buffer.
+Argument SOURCE-BUF url-http response buffer."
   (when (and source-buf org-ai-debug-buffer)
     (save-excursion
       (let* ((buf-exist (get-buffer org-ai-debug-buffer))
@@ -395,7 +401,7 @@ Otherwise format every to string and concatenate."
 ;;; - Get constant functions
 (defun org-ai--check-model (model endpoint)
   "Check if the model name is somehow mistyped.
-`MODEL' is the model name. `ENDPOINT' is the API endpoint."
+`MODEL' is the model name.  `ENDPOINT' is the API endpoint."
   (unless model
     (error "No org-ai model specified."))
 
@@ -410,26 +416,27 @@ Otherwise format every to string and concatenate."
       (message "Model '%s' is not in the list of available models. Maybe this is because of a typo or maybe we haven't yet added it to the list. To disable this message add (add-to-list 'org-ai-chat-models \"%s\") to your init file." model model))))
 
 (defun org-ai--read-service-name (name)
-  "Map a service name such as 'openai' to a valid `org-ai-service' symbol."
+  "Map a service NAME such as 'openai' to a valid `org-ai-service' symbol."
   (intern-soft name))
 
-(defun org-ai--service-of-model (model)
-  "Return the service of the model.
-`MODEL' is the model name."
-  (cond
-   ((string-prefix-p "gpt-" model) 'openai)
-   ((string-prefix-p "chatgpt-" model) 'openai)
-   ((string-prefix-p "o1" model) 'openai)
-   ((string-prefix-p "o3" model) 'openai)
-   ((string-prefix-p "o4" model) 'openai)
-   ((string-prefix-p "claude" model) 'anthropic)
-   ((string-prefix-p "gemini" model) 'google)
-   ((string-prefix-p "deepseek" model) 'deepseek)
-   (t nil)))
+;; (defun org-ai--service-of-model (model)
+;;   "Return the service of the model.
+;; `MODEL' is the model name."
+;;   (cond
+;;    ((string-prefix-p "gpt-" model) 'openai)
+;;    ((string-prefix-p "chatgpt-" model) 'openai)
+;;    ((string-prefix-p "o1" model) 'openai)
+;;    ((string-prefix-p "o3" model) 'openai)
+;;    ((string-prefix-p "o4" model) 'openai)
+;;    ((string-prefix-p "claude" model) 'anthropic)
+;;    ((string-prefix-p "gemini" model) 'google)
+;;    ((string-prefix-p "deepseek" model) 'deepseek)
+;;    (t nil)))
 
-(defun org-ai--openai-get-token (&optional service)
+(defun org-ai--openai-get-token (service)
   "Try to get the openai token.
-Either from `org-ai-openai-api-token' or from auth-source."
+Either from `org-ai-openai-api-token' or from auth-source.
+Optional argument SERVICE of token."
   (or (and
        (stringp org-ai-openai-api-token)
        (not (string-empty-p org-ai-openai-api-token))
@@ -439,54 +446,61 @@ Either from `org-ai-openai-api-token' or from auth-source."
        (org-ai--openai-get-token-auth-source service))
       (error "Please set `org-ai-openai-api-token' to your OpenAI API token or setup auth-source (see org-ai readme)")))
 
-(defun strip-api-url (url)
-  "Strip the leading https:// and trailing / from an URL"
-  (let ((stripped-url (if (string-prefix-p "https://" url)
-                          (substring url 8)
-                        url)))
-    (if (string-suffix-p "/" stripped-url)
-        (substring stripped-url 0 -1)
-      stripped-url)))
+
+(defun org-ai--strip-api-url (url)
+  "Strip the leading https:// and trailing / from an URL."
+  (let* ((stripped-url
+          ;; Remove "https://" or "http://" if present
+          (cond
+           ((string-prefix-p "https://" url) (substring url 8))
+           ((string-prefix-p "http://" url) (substring url 7))
+           (t url)))
+         (parts (split-string stripped-url "/" t))) ; Split by '/', t means remove empty strings
+    ;; Return the first part, which should be the hostname
+    (car parts)))
 
 (defun org-ai--openai-get-token-auth-source (&optional service)
-  "Retrieves the authentication token for the OpenAI service using auth-source."
+  "Retrieves the authentication token for the OpenAI SERVICE using auth-source."
   (require 'auth-source)
   (let* ((service (or service org-ai-service))
-         (endpoint (pcase service
-                     ('openai "api.openai.com")
-                     ('deepseek "api.deepseek.com")
-                     ('perplexity.ai "api.perplexity.ai")
-                     ('anthropic "api.anthropic.com")
-                     ('google "generativelanguage.googleapis.com")
-                     ('together "api.together.xyz")
-                     ('azure-openai (strip-api-url org-ai-azure-openai-api-base)))))
+         ;; azure-openai - special case
+         (endpoint (if (eql endpoint 'azure-openai)
+                       (org-ai--strip-api-url org-ai-azure-openai-api-base)
+                     ;; else - parse URL
+                     (car (alist-get service org-ai-endpoints)))))
     (or (auth-source-pick-first-password :host endpoint :user "org-ai")
         (auth-source-pick-first-password :host endpoint :login "org-ai"))))
+
+(defcustom org-ai-endpoints
+  '((perplexity.ai	"https://api.perplexity.ai/chat/completions")
+    (deepseek		"https://api.deepseek.com/v1/chat/completions")
+    (anthropic		"https://api.anthropic.com/v1/messages")
+    (google		"https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
+    (together		"https://api.together.xyz/v1/chat/completions")
+    )
+  "Endpoints for services.
+  This is a not ordered list of key-value pairs in format of List of
+  lists: (SYMBOL VALUE-STRING). Used for POST HTTP request to service."
+  :type '(alist :key-type (symbol :tag "Service")
+                :value-type (string :tag "Endpoint URL")
+  :group 'org-ai))
 
 
 (defun org-ai--get-endpoint (messages &optional service)
   "Determine the correct endpoint based on the service and
 whether messages are provided."
-  (let ((service (or service org-ai-service)))
+  (let* ((service (or service org-ai-service))
+        (endpoint (car (alist-get service org-ai-endpoints))))
     (cond
+     (endpoint endpoint)
      ((eq service 'azure-openai)
       (format "%s/openai/deployments/%s%s/completions?api-version=%s"
-	      org-ai-azure-openai-api-base org-ai-azure-openai-deployment
-	      (if messages "/chat" "") org-ai-azure-openai-api-version))
-     ((eq service 'perplexity.ai)
-      "https://api.perplexity.ai/chat/completions")
-     ((eq service 'deepseek)
-      "https://api.deepseek.com/v1/chat/completions")
-     ((eq service 'anthropic)
-      "https://api.anthropic.com/v1/messages")
-     ((eq service 'google)
-      org-ai-google-chat-endpoint)
-     ((eq service 'together)
-      "https://api.together.xyz/v1/chat/completions")
+              org-ai-azure-openai-api-base org-ai-azure-openai-deployment
+              (if messages "/chat" "") org-ai-azure-openai-api-version))
      (t
       (if messages org-ai-openai-chat-endpoint org-ai-openai-completion-endpoint)))))
 
-(defun org-ai--get-headers (&optional service)
+(defun org-ai--get-headers (service)
   "Determine the correct headers based on the service."
   (let ((service (or service org-ai-service)))
     `(("Content-Type" . "application/json")
@@ -503,8 +517,12 @@ whether messages are provided."
          `(("Authorization" . ,(encode-coding-string (string-join `("Bearer" ,(org-ai--openai-get-token service)) " ") 'utf-8))))))))
 
 ;;; - main
-(cl-defun org-ai-stream-completion (&optional &key prompt messages context model max-tokens temperature top-p frequency-penalty presence-penalty service stream)
-  "Compose API request.
+;; org-ai-stream-completion - old
+
+;; &optional &key prompt messages context model max-tokens temperature top-p frequency-penalty presence-penalty service stream
+(defun org-ai-api-request-prepare (req-type content end-marker sys-prompt sys-prompt-for-all-messages model max-tokens top-p temperature frequency-penalty presence-penalty service stream)
+  "Compose API request from Org block.
+Call `org-ai-api-request' function as a next step.
 Start a server-sent event stream.
 Called from `org-ai-complete-block' in main file with query string in `PROMPT' or in
 `MESSAGES'.
@@ -517,73 +535,60 @@ Called from `org-ai-complete-block' in main file with query string in `PROMPT' o
 `PRESENCE-PENALTY' is the presence penalty.
 `CONTEXT' is the context of the special block.
 `SERVICE' string - is the AI cloud service such as 'openai or 'azure-openai'.
-`STREAM' string - as bool, indicates whether to stream the response.
-"
+`STREAM' string - as bool, indicates whether to stream the response."
   ;; - Step 1) get Org properties or block parameters
-  (let* ((context (or context (org-ai-special-block)))
-         (buffer (current-buffer))
-         (info (org-ai-get-block-info context)) ; ((:max-tokens . 150) (:service . "together") (:model . "xxx"))
-         (callback (cond ; for org-ai-stream-request
-                    (messages (lambda (result) (org-ai--insert-stream-response context buffer result t)))
-                    ; prompt, req-type = completion
-                    (t (lambda (result) (org-ai--insert-single-response context buffer result))))))
+  (let* (
+         ;; (context (or context (org-ai-special-block)))
+         ;; (content (org-ai-get-block-content context)) ; org-ai-block.el
+         ;; (buffer (current-buffer))
+         (messages (unless (eql req-type 'completion)
+                     (org-ai--collect-chat-messages content
+                                                    sys-prompt
+                                                    sys-prompt-for-all-messages))) ; org-ai-block.el
+         ;; TODO: replace with result of `org-ai-agent-callback' call
+         (callback (cond
+                    (messages
+                          (lambda (result) (org-ai--insert-stream-response end-marker result t)))
+                    ;; - completion
+                    (t (lambda (result) (org-ai--insert-single-response end-marker result))))))
+    ;; - Step 2) get Org properties or block parameters
+    (org-ai--debug "frequencypenalty" frequency-penalty)
+    (org-ai--debug "callbackmy" callback)
+    (org-ai-api-request :prompt content ; if completion
+                        :messages messages
+                        :model model
+                        :max-tokens max-tokens
+                        :temperature temperature
+                        :top-p top-p
+                        :frequency-penalty frequency-penalty
+                        :presence-penalty presence-penalty
+                        :service service
+                        :callback callback
+                        :stream stream)))
 
-    (org-ai--debug info)
-    ;; This macro helps in defining local variables by trying to get their values from:
-    ;; 1. Existing local variable (if passed as argument to the main function)
-    ;; 2. Alist `info` (from Org-AI block header, e.g., :model "gpt-4")
-    ;; 3. Inherited Org property (e.g., #+PROPERTY: model gpt-4)
-    ;; 4. Default form (if provided)
-    (cl-macrolet ((let-with-captured-arg-or-header-or-inherited-property ; NAME
-                    (definitions &rest body) ; ARGLIST
-                    `(let ,(cl-loop for (sym . default-form) in definitions ; BODY
-                                    collect `(,sym ; Try existing variable first
-                                                (or ,sym ; try function parameter
-                                                       (alist-get ,(intern (format ":%s" (symbol-name sym))) info) ; Then from Org-AI block info
-                                                       (when-let ((prop (org-entry-get-with-inheritance ,(symbol-name sym)))) ; Then from inherited Org property
-                                                         ;; --- Conversion Logic for Parameters ---
-                                                         (if (eq (quote ,sym) 'model)
-                                                             prop
-                                                           (if (stringp prop) (string-to-number prop) prop)))
-                                                       ,@default-form)))
-                       ,@body)))
-      ;; FORM
-      (let-with-captured-arg-or-header-or-inherited-property
-       ((model (if messages org-ai-default-chat-model org-ai-default-completion-model))
-        (max-tokens org-ai-default-max-tokens) ; int
-        (top-p)
-        (temperature)
-        (frequency-penalty)
-        (presence-penalty)
-        (service)
-        (stream)
-        )
-       ;; - Step 2) get Org properties or block parameters
-       (org-ai-stream-request :prompt prompt
-                                :messages messages
-                                :model model
-                                :max-tokens max-tokens
-                                :temperature temperature
-                                :top-p top-p
-                                :frequency-penalty frequency-penalty
-                                :presence-penalty presence-penalty
-                                :service service
-                                :callback callback
-                                :stream stream)))))
+;; (defun org-ai-agent-main(prompt messages context model max-tokens temperature top-p frequency-penalty presence-penalty service stream)
+;;   "Gate from Interface to API."
+;;   )
+;; (defun org-ai-agent-callback ()
+;;   "Gate from API to Interface.
+;; Not used for streaming text from API."
+;;   )
+
+
 ;; Together.xyz 2025
 ;; '(id "nz7KyaB-3NKUce-9539d1912ce8b148" object "chat.completion" created 1750575101 model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free" prompt []
 ;;   choices [(finish_reason "length" seed 3309196889559996400 logprobs nil index 0
 ;;             message (role "assistant" content " The answer is simple: live a long time. But how do you do that? Well, itâs not as simple as it sounds." tool_calls []))] usage (prompt_tokens 5 completion_tokens 150 total_tokens 155 cached_tokens 0))
 
 
-(defun org-ai--insert-single-response (context buffer &optional response)
+(defun org-ai--insert-single-response (end-marker &optional response)
   "For Completion LLM mode.
-Used as callback for `org-ai-stream-request'.
+Used as callback for `org-ai-api-request'.
 Insert the response from the OpenAI API into #+begin_ai block.
 `CONTEXT' is the context of the special block. `BUFFER' is the
 buffer to insert the response into. `RESPONSE' is the response
 from the OpenAI API."
-  (org-ai--debug "context:" context
+  (org-ai--debug "end-marker:" end-marker
                  "response:" response)
   (when response
     (if-let ((error (plist-get response 'error)))
@@ -592,15 +597,15 @@ from the OpenAI API."
                 (text (or (plist-get choice 'text)
                           ;; Together.xyz way
                           (plist-get (plist-get choice 'message) 'content)))
-                )
+                (buffer (marker-buffer end-marker)))
         (with-current-buffer buffer
           (org-ai--debug "text:" text)
           ;; set mark so we can easily select the generated text (e.g. to delet it to try again)
           (unless org-ai--current-insert-position-marker
-            (push-mark (org-element-property :contents-end context)))
+            (push-mark end-marker))
           (let ((pos (or (and org-ai--current-insert-position-marker
                               (marker-position org-ai--current-insert-position-marker))
-                         (org-element-property :contents-end context)))
+                         end-marker))
                 (text-decoded (decode-coding-string text 'utf-8)))
             (save-excursion
               (goto-char pos)
@@ -731,14 +736,15 @@ from the OpenAI API."
                                 (push (make-org-ai--response :type 'role :payload role) result))
                               result))))))))
 
-(defun org-ai--insert-stream-response (context buffer &optional response insert-role)
+(defun org-ai--insert-stream-response (end-marker &optional response insert-role)
   "`RESPONSE' is one JSON message of the stream response.
-Used as callback for `org-ai-stream-request'.
+Used as callback for `org-ai-api-request'.
 When `RESPONSE' is nil, it means we are done. `CONTEXT' is the
 context of the special block. `BUFFER' is the buffer to insert
 the response into."
   (org-ai--debug "response:" response)
-  (let ((normalized (org-ai--normalize-response response)))
+  (let ((normalized (org-ai--normalize-response response))
+        (buffer (marker-buffer end-marker)))
    (cl-loop for response in normalized
             do (let ((type (org-ai--response-type response)))
                  (when (eq type 'error)
@@ -747,7 +753,7 @@ the response into."
                  (with-current-buffer buffer
                    (let ((pos (or (and org-ai--current-insert-position-marker
                                        (marker-position org-ai--current-insert-position-marker))
-                                  (and context (org-element-property :contents-end context))
+                                  end-marker
                                   (point))))
                      (save-excursion
                        (goto-char pos)
@@ -830,9 +836,10 @@ the response into."
                                (org-element-cache-reset)
                                (when org-ai-jump-to-end-of-block (goto-char org-ai--current-insert-position-marker)))))))))
    normalized))
-
-(cl-defun org-ai-stream-request (&optional &key prompt messages model max-tokens temperature top-p frequency-penalty presence-penalty service stream callback stream)
-  "Executed by `org-ai-stream-completion'
+;; org-ai-stream-request - old
+(cl-defun org-ai-api-request (&optional &key prompt messages model max-tokens temperature top-p frequency-penalty presence-penalty service stream callback stream)
+  "Use API to LLM to request and get response.
+Executed by `org-ai-api-request-prepare'
 `PROMPT' is the query for completions `MESSAGES' is the query for
 chatgpt. `CALLBACK' is the callback function. `MODEL' is the
 model to use. `MAX-TOKENS' is the maximum number of tokens to
@@ -846,14 +853,15 @@ penalty. `PRESENCE-PENALTY' is the presence penalty."
   ;; (setq org-ai--debug-data-raw nil)
   (setq org-ai--currently-inside-code-markers nil)
   ;; - local
-  (setq service (or (if (stringp service) (org-ai--read-service-name service) service)
-                    (org-ai--service-of-model model)
-                    org-ai-service))
+  ;; (setq service (or (if (stringp service) (org-ai--read-service-name service) service)
+  ;;                   ;; (org-ai--service-of-model model)
+  ;;                   org-ai-service))
+  (org-ai--debug service (type-of service))
   (org-ai--debug stream (type-of stream))
-  (setq stream (if (and stream (string-equal-ignore-case stream "nil"))
-                   nil
-                 ;; else
-                 (org-ai--stream-supported service model)))
+  ;; (setq stream (if (and stream (string-equal-ignore-case stream "nil"))
+  ;;                  nil
+  ;;                ;; else
+  ;;                (org-ai--stream-supported service model)))
 
   ;; - HTTP body preparation as a string
   (let* ((url-request-extra-headers (org-ai--get-headers service))

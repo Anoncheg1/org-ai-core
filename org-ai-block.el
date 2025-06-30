@@ -16,13 +16,19 @@
 ;; along with org-ai.el.
 ;; If not, see <https://www.gnu.org/licenses/>.
 
+;;; Changelog
+;; - TODO: rename org-ai-special-block to org-ai-block-p
+;; - DONE: complete is short for completion
+;; - DONE: org-ai-get-block-info fail if there is nothing in block.
+;; - DONE: rename all CONTEXT to ELEMENT because context cause confusing (Org terms).
+
 ;;; Commentary:
 
 ;; Defines functions for dealing with #+begin_ai..#+end_ai special blocks
 
-;;; Changelog
-;; - TODO: rename org-ai-special-block to org-ai-block-p
-;; - DONE: complete is short for completion
+;; Note Org terms:
+;; - element - "room" you are in (e.g., a paragraph) (TYPE PROPS) (org-element-at-point)
+;; - context - "furniture" you are touching within that room (e.g., a bold word, a link). (TYPE PROPS) (org-element-context)
 
 ;;; Code:
 
@@ -54,13 +60,16 @@
              do (setq context (org-element-property :parent context))
              finally return context)))
 
-(defun org-ai-get-block-info (&optional context)
+(defun org-ai-get-block-info (&optional element)
   "Parse the header of #+begin_ai...#+end_ai block.
-`CONTEXT' is the context of the special block. Return an alist of
-key-value pairs."
-  (let* ((context (or context (org-ai-special-block)))
-         (header-start (org-element-property :post-affiliated context))
-         (header-end (org-element-property :contents-begin context)))
+`ELEMENT' is the element of the special block. Return an alist of
+key-value pairs.
+Like org-babel-get-src-block-info."
+  (let* ((element (or element (org-ai-special-block)))
+         (header-start (org-element-property :post-affiliated element))
+         (header-end (or (org-element-property :contents-begin element)
+                         (point-at-eol))) ; fix for empty block
+                     )
     (if (or (not header-start) (not header-end))
         (error "Error: org-ai was not able to extract the beginning/end of the org-ai block")
       (save-match-data
@@ -74,18 +83,18 @@ STRING1 and STRING2 are strings. Return t if they are equal
 ignoring case."
   (eq 't (compare-strings string1 0 nil string2 0 nil t)))
 
-(defun org-ai-get-block-content (&optional context)
+(defun org-ai-get-block-content (&optional element)
   "Extracts the text content of the #+begin_ai...#+end_ai block.
-`CONTEXT' is the context of the special block.
+`ELEMENT' is the element of the special block.
 
 Will expand noweb templates if an 'org-ai-noweb' property or
 'noweb' header arg is \"yes\""
 
-  (let* ((context (or context (org-ai-special-block)))
-         (content-start (org-element-property :contents-begin context))
-         (content-end (org-element-property :contents-end context))
+  (let* ((element (or element (org-ai-special-block)))
+         (content-start (org-element-property :contents-begin element))
+         (content-end (org-element-property :contents-end element))
          (unexpanded-content (string-trim (buffer-substring-no-properties content-start content-end)))
-         (info (org-ai-get-block-info context))
+         (info (org-ai-get-block-info element))
          (noweb-control (or (alist-get :noweb info nil)
                             (org-entry-get (point) "org-ai-noweb" 1)
                             "no"))
@@ -117,11 +126,68 @@ If exist return nil or string, if not exist  return `default'."
       ;; else - nil or string
       sys-raw)))
 
+;; (defmacro org-ai-block--let-params (info definitions &rest body)
+;;   "A specialized `let*' macro for Org-AI parameters.
+;; DEFINITIONS is a list of (VARIABLE &optional DEFAULT-FORM &key TYPE).
+;; TYPE can be 'number or 'identity.
+;; Parameters are sourced from:
+;; 1. From Org-AI block header `info' alist. (e.g., :model \"gpt-4\")
+;; 2. Org inherited property. (e.g., #+PROPERTY: model gpt-4)
+;; 3. DEFAULT-FORM."
+;;   `(let* ,(cl-loop for (sym default-form &key type) in definitions
+;;                    collect
+;;                    `(,sym (or ,sym
+;;                               (alist-get ,(intern (format ":%s" (symbol-name sym))) info)
+;;                               ,(cond
+;;                                ((string= (symbol-name sym) "model") ; Special: no conversion for model
+;;                                 `(org-entry-get-with-inheritance ,(symbol-name sym)))
+;;                                ((eq type 'number)
+;;                                 `(when-let ((prop (org-entry-get-with-inheritance ,(symbol-name sym))))
+;;                                    (if (stringp prop) (string-to-number prop) prop)))
+;;                                (t ; Default: identity conversion
+;;                                 `(org-entry-get-with-inheritance ,(symbol-name sym))))
+;;                               ,@(when default-form `(,default-form)))))
+;;      ,@body))
+(defmacro org-ai-block--let-params (info definitions &rest body)
+  "A specialized `let*' macro for Org-AI parameters.
+DEFINITIONS is a list of (VARIABLE &optional DEFAULT-FORM &key TYPE).
+TYPE can be 'number or 'identity.
+Parameters are sourced from:
+1. From Org-AI block header `info' alist. (e.g., :model \"gpt-4\")
+2. Org inherited property. (e.g., #+PROPERTY: model gpt-4)
+3. DEFAULT-FORM."
+  `(let* ,(cl-loop for def-item in definitions
+                   collect
+                   (let* ((sym (car def-item))
+                          (default-form (cadr def-item))
+                          ;; Look for the :type keyword in the rest of the list
+                          (type (cadr (member :type def-item))))
+                     `(,sym (or (alist-get ,(intern (format ":%s" (symbol-name sym))) info)
+                                ,(cond
+                                  ((string= (symbol-name sym) "model") ; Special: no conversion for model
+                                   `(org-entry-get-with-inheritance ,(symbol-name sym)))
+                                  ((eq type 'number)
+                                   `(when-let ((prop (org-entry-get-with-inheritance ,(symbol-name sym))))
+                                      (if (stringp prop) (string-to-number prop) prop)))
+                                  (t ; Default: identity conversion
+                                   `(org-entry-get-with-inheritance ,(symbol-name sym))))
+                                ,@(when default-form `(,default-form))))))
+     ,@body))
+
+
+(defun org-ai-block--get-contents-end-marker (element)
+  "Return a marker for the :contents-end property of ELEMENT."
+  (with-current-buffer (org-element-property :buffer element)
+    (let ((contents-end-pos (org-element-property :contents-end element)))
+      (when contents-end-pos
+        (copy-marker contents-end-pos)))))
+
+
 (defun org-ai--chat-role-regions ()
   "Splits the special block by role prompts."
-  (if-let* ((context (org-ai-special-block))
-            (content-start (org-element-property :contents-begin context))
-            (content-end (org-element-property :contents-end context)))
+  (if-let* ((element (org-ai-special-block))
+            (content-start (org-element-property :contents-begin element))
+            (content-end (org-element-property :contents-end element)))
       (let ((result (save-match-data
                       (save-excursion
                         (goto-char content-start)
