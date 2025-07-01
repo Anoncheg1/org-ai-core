@@ -128,14 +128,14 @@ Read Org parameters and send the text content to next step."
   (interactive)
   ;; -- 1) Org "Pre-parsing"
   (let* ((element (org-ai-block-p)) ; org-ai-block.el
-         (info (org-ai-get-block-info element)) ; ((:max-tokens . 150) (:service . "together") (:model . "xxx")) ; org-ai-block.el
+         (info (org-ai-block-get-info element)) ; ((:max-tokens . 150) (:service . "together") (:model . "xxx")) ; org-ai-block.el
          (end-marker (org-ai-block--get-contents-end-marker element))
-         (req-type (org-ai--get-request-type info)) ; org-ai-block.el
+         (req-type (org-ai-block--get-request-type info)) ; org-ai-block.el
          (sys-prompt-for-all-messages (or (not (eql 'x (alist-get :sys-everywhere info 'x)))
                                           (org-entry-get-with-inheritance "SYS-EVERYWHERE") ; org
                                           org-ai-default-inject-sys-prompt-for-all-messages)) ; org-ai-openai.el
          (sys-prompt (or (org-entry-get-with-inheritance "SYS") ; org
-                         (org-ai--get-sys :info info ; org-ai-block.el
+                         (org-ai-block--get-sys :info info ; org-ai-block.el
                                           :default org-ai-default-chat-system-prompt)))) ; org-ai-openai.el variable
     (org-ai--debug info)
     ;; - Process Org params and call agent
@@ -150,7 +150,7 @@ Read Org parameters and send the text content to next step."
                                (presence-penalty nil :type number)
                                (stream "t" :type string))
                               ;; - body with some Org "Post-parsing":
-                              (let ((content (org-ai-get-block-content element))
+                              (let ((content (org-ai-block-get-content element))
                                     (service (or (if (stringp service) (org-ai--read-service-name service) service) ; org-ai-openai.el
                                                  ;; (org-ai--service-of-model model)
                                                  org-ai-service)) ; org-ai-openai.el
@@ -163,24 +163,6 @@ Read Org parameters and send the text content to next step."
                                          model max-tokens top-p temperature frequency-penalty presence-penalty service stream ; model params
                                          )))))
 
-    ;; ;; -- --
-    ;; (cl-case req-type
-    ;;   (completion (org-ai-interface-step2 :prompt content ; org-ai-openai.el
-    ;;                                         :context context))
-    ;;   ;; (image (org-ai-create-and-embed-image context)) ; org-ai-openai-image.el
-    ;;   ;; (sd-image (org-ai-create-and-embed-sd context)) ; org-ai-sd.el
-    ;;   ;; (local-chat (org-ai-oobabooga-stream :messages (org-ai--collect-chat-messages ; org-ai-oobabooga
-    ;;   ;;                                                 content
-    ;;   ;;                                                 default-system-prompt
-    ;;   ;;                                                 sys-prompt-for-all-messages)
-    ;;   ;;                                      :context context))
-    ;;   ;; by default:
-    ;;   (t (org-ai-interface-step2 :messages (org-ai--collect-chat-messages ; org-ai-openai
-    ;;                                           content
-    ;;                                           sys-prompt
-    ;;                                           sys-prompt-for-all-messages)
-    ;;                                :context context)))))
-
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 ;; -= M-x org-ai-expand-block
 ;;;###autoload
@@ -190,7 +172,7 @@ This is what will be sent to the api.  ELEMENT is the org-ai block.
 Like `org-babel-expand-src-block'."
   (interactive)
   (let* ((element (or element (org-ai-block-p))) ; org-ai-block.el
-         (expanded (org-ai-get-block-content element))) ; org-ai-block.el
+         (expanded (org-ai-block-get-content element))) ; org-ai-block.el
     (if (called-interactively-p 'any)
         (let ((buf (get-buffer-create "*Org-Ai Preview*")))
           (with-help-window buf (with-current-buffer buf
@@ -200,7 +182,7 @@ Like `org-babel-expand-src-block'."
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 ;; keyboard quit
 
-(defvar org-ai-talk--reading-process)
+;; (defvar org-ai-talk--reading-process)
 
 (defun org-ai-keyboard-quit ()
   "Keyboard quit advice.

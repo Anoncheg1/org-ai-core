@@ -514,7 +514,7 @@ whether messages are provided."
         (t
          `(("Authorization" . ,(encode-coding-string (string-join `("Bearer" ,(org-ai--openai-get-token service)) " ") 'utf-8))))))))
 
-;;; - main
+;;; - Main
 ;; org-ai-stream-completion - old
 
 ;; &optional &key prompt messages context model max-tokens temperature top-p frequency-penalty presence-penalty service stream
@@ -537,7 +537,7 @@ Called from `org-ai-complete-block' in main file with query string in `PROMPT' o
   ;; - Step 1) get Org properties or block parameters
   (let* (
          (messages (unless (eql req-type 'completion)
-                     (org-ai--collect-chat-messages content
+                     (org-ai-openai--collect-chat-messages content
                                                     sys-prompt
                                                     sys-prompt-for-all-messages))) ; org-ai-block.el
          ;; TODO: replace with result of `org-ai-agent-callback' call
@@ -1180,6 +1180,185 @@ Set
   (when org-ai--current-progress-timer
     (cancel-timer org-ai--current-progress-timer)
     (setq org-ai--current-progress-timer-remaining-ticks 0)))
+
+
+(defun org-ai-openai--collect-chat-messages (content-string &optional default-system-prompt persistant-sys-prompts)
+  "Takes `CONTENT-STRING' and splits it by [SYS]:, [ME]:, [AI]: and [AI_REASON]: markers.
+If `PERSISTANT-SYS-PROMPTS' is non-nil, [SYS] prompts are
+intercalated. The [SYS] prompt used is either
+`DEFAULT-SYSTEM-PROMPT', may be nil to disable, or the first [SYS]
+prompt found in `CONTENT-STRING'."
+  (with-temp-buffer
+    (erase-buffer)
+    (insert content-string)
+    (goto-char (point-min))
+
+    (let* (;; collect all positions before [ME]: and [AI]:
+           (sections (cl-loop while (search-forward-regexp "\\[SYS\\]:\\|\\[ME\\]:\\|\\[AI\\]:\\|\\[AI_REASON\\]:" nil t)
+                              collect (save-excursion
+                                        (goto-char (match-beginning 0))
+                                        (point))))
+
+           ;; make sure we have from the beginning if there is no first marker
+           (sections (if (not sections)
+                         (list (point-min))
+                       (if (not (= (car sections) (point-min)))
+                           (cons (point-min) sections)
+                         sections)))
+
+           (parts (cl-loop for (start end) on sections by #'cdr
+                           collect (string-trim (buffer-substring-no-properties start (or end (point-max))))))
+
+           ;; if no role is specified, assume [ME]
+           (parts (if (and
+                       (not (string-prefix-p "[SYS]:" (car parts)))
+                       (not (string-prefix-p "[ME]:" (car parts)))
+                       (not (string-prefix-p "[AI]:" (car parts)))
+                       (not (string-prefix-p "[AI_REASON]:" (car parts))))
+                      (progn (setf (car parts) (concat "[ME]: " (car parts)))
+                             parts)
+                    parts))
+
+           ;; create (:role :content) list
+           (messages (cl-loop for part in parts
+                              ;; Filter out reasoning parts as including them will cause 404
+                              ;; https://api-docs.deepseek.com/guides/reasoning_model#multi-round-conversation
+                              if (not (string= "[AI_REASON]" (car (split-string part ":"))))
+                              collect (cl-destructuring-bind (type &rest content) (split-string part ":")
+                                        (let ((type (string-trim type))
+                                              (content (string-trim (string-join content ":"))))
+                                          (list :role (cond ((string= type "[SYS]") 'system)
+                                                            ((string= type "[ME]") 'user)
+                                                            ((string= type "[AI]") 'assistant)
+                                                            (t 'assistant))
+                                                :content content)))))
+
+           (messages (cl-remove-if-not (lambda (x) (not (string-empty-p (plist-get x :content)))) messages))
+
+           ;; merge messages with same role
+           (messages (cl-loop with last-role = nil
+                              with result = nil
+                              for (_ role _ content) in messages
+                              if (eql role last-role)
+                              do (let ((last (pop result)))
+                                   (push (list :role role :content (string-join (list (plist-get last :content) content) "\n")) result))
+                              else
+                              do (push (list :role role :content content) result)
+                              do (setq last-role role)
+                              finally return (reverse result)))
+
+           ;; [SYS] in messages?
+           (starts-with-sys-prompt-p (and messages (eql (plist-get (car messages) :role) 'system)))
+
+           (sys-prompt (if starts-with-sys-prompt-p
+                           (plist-get (car messages) :content)
+                         ;; else
+                         default-system-prompt))
+
+           (messages (if persistant-sys-prompts
+                         (cl-loop with result = nil
+                                  for (_ role _ content) in messages
+                                  if (eql role 'assistant)
+                                  do (push (list :role 'assistant :content content) result)
+                                  else if (eql role 'user)
+                                  do (progn
+                                       (push (list :role 'system :content sys-prompt) result)
+                                       (push (list :role 'user :content content) result))
+                                  finally return (reverse result))
+                       (if (or starts-with-sys-prompt-p (not sys-prompt))
+                           messages
+                         (cons (list :role 'system :content sys-prompt) messages)))))
+
+      (apply #'vector messages))))
+
+;; deal with unspecified prefix
+(cl-assert
+ (equal
+  (let ((test-string "\ntesting\n  [ME]: foo bar baz zorrk\nfoo\n[AI]: hello hello[ME]: "))
+    (org-ai-openai--collect-chat-messages test-string))
+  '[(:role user :content "testing\nfoo bar baz zorrk\nfoo")
+    (:role assistant :content "hello hello")]))
+
+;; sys prompt
+(cl-assert
+ (equal
+  (let ((test-string "[SYS]: system\n[ME]: user\n[AI]: assistant"))
+    (org-ai-openai--collect-chat-messages test-string))
+  '[(:role system :content "system")
+    (:role user :content "user")
+    (:role assistant :content "assistant")]))
+
+;; sys prompt intercalated
+(cl-assert
+ (equal
+  (let ((test-string "[SYS]: system\n[ME]: user\n[AI]: assistant\n[ME]: user"))
+    (org-ai-openai--collect-chat-messages test-string nil t))
+  '[(:role system :content "system")
+    (:role user :content "user")
+    (:role assistant :content "assistant")
+    (:role system :content "system")
+    (:role user :content "user")]))
+
+;; merge messages with same role
+(cl-assert
+ (equal
+  (let ((test-string "[ME]: hello [ME]: world")) (org-ai-openai--collect-chat-messages test-string))
+  '[(:role user :content "hello\nworld")]))
+
+;; (comment
+;;   (with-current-buffer "org-ai-mode-test.org"
+;;    (org-ai-openai--collect-chat-messages (org-ai-block-get-content))))
+
+;; - Not used now
+(cl-defun org-ai-openai--stringify-chat-messages (messages &optional &key
+                                                    default-system-prompt
+                                                    (system-prefix "[SYS]: ")
+                                                    (user-prefix "[ME]: ")
+                                                    (assistant-prefix "[AI]: "))
+  "Converts a chat message to a string.
+`MESSAGES' is a vector of (:role :content) pairs. :role can be
+'system, 'user or 'assistant. If `DEFAULT-SYSTEM-PROMPT' is
+non-nil, a [SYS] prompt is prepended if the first message is not
+a system message. `SYSTEM-PREFIX', `USER-PREFIX' and
+`ASSISTANT-PREFIX' are the prefixes for the respective roles
+inside the assembled prompt string."
+  (let ((messages (if (and default-system-prompt
+                           (not (eql (plist-get (aref messages 0) :role) 'system)))
+                      (cl-concatenate 'vector (vector (list :role 'system :content default-system-prompt)) messages)
+                    messages)))
+    (cl-loop for (_ role _ content) across messages
+             collect (cond ((eql role 'system) (concat system-prefix content))
+                           ((eql role 'user) (concat user-prefix content))
+                           ((eql role 'assistant) (concat assistant-prefix content)))
+             into result
+             finally return (string-join result "\n\n"))))
+
+(cl-assert
+ (equal
+  (org-ai-openai--stringify-chat-messages '[(:role system :content "system")
+                                     (:role user :content "user")
+                                     (:role assistant :content "assistant")])
+  "[SYS]: system\n\n[ME]: user\n\n[AI]: assistant"))
+
+(cl-assert
+ (equal
+  (org-ai-openai--stringify-chat-messages '[(:role user :content "user")
+                                     (:role assistant :content "assistant")]
+                                   :default-system-prompt "system")
+  "[SYS]: system\n\n[ME]: user\n\n[AI]: assistant"))
+
+(cl-assert
+ (equal
+  (org-ai-openai--stringify-chat-messages '[(:role user :content "user")
+                                     (:role assistant :content "assistant")]
+                                   :user-prefix "You: "
+                                   :assistant-prefix "Assistant: ")
+  "You: user\n\nAssistant: assistant"))
+
+
+
+
+
 
 (defun org-ai-open-request-buffer ()
   "A debug helper that opens the url request buffer."

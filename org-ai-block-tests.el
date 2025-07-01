@@ -42,7 +42,7 @@ and INFO-ALIST is the parameters from its header."
 
           ;; Position point inside the block for correct context, though not strictly needed for info directly.
           (goto-char (org-element-property :begin element))
-          (setq info (org-ai-get-block-info))
+          (setq info (org-ai-block-get-info))
           (org-ai-block--let-params info ((stream) (sys) (max-tokens :type integer) (model) (temperature :type float) (unknown "s"))
                                          ;; (print (list max-tokens (type-of max-tokens)))
                                          ;; (print (list temperature (type-of temperature)))
