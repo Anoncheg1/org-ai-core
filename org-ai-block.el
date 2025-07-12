@@ -175,8 +175,12 @@ Used in `org-ai-interface-step1'"
         (copy-marker contents-end-pos)))))
 
 
+(defvar org-ai-block--roles-regex "\\[SYS\\]:\\|\\[ME\\]:\\|\\[ME:\\]\\|\\[AI\\]:\\|\\[AI_REASON\\]:")
+
 (defun org-ai-block--chat-role-regions ()
-  "Splits the special block by role prompts."
+  "Splits the special block by role prompts.
+Return line begining positions of first line of content, roles, #+end_ai
+line."
   (if-let* ((element (org-ai-block-p))
             (content-start (org-element-property :contents-begin element))
             (content-end (org-element-property :contents-end element)))
@@ -184,7 +188,7 @@ Used in `org-ai-interface-step1'"
                       (save-excursion
                         (goto-char content-start)
                         (cl-loop with result
-                                 while (search-forward-regexp "\\[SYS\\]:\\|\\[ME\\]:\\|\\[AI\\]:\\|\\[AI_REASON\\]:" content-end t)
+                                 while (search-forward-regexp org-ai-block--roles-regex content-end t) ; todo, make as global variable
                                  do (push (match-beginning 0) result)
                                  finally return result)))))
         (if result
@@ -216,6 +220,29 @@ Used in `org-ai-interface-step1'"
       (goto-char start)
       (push-mark end t t)
       (cons start end))))
+
+(defun org-ai-forward-section (&optional arg)
+  "Move forward to end of section.
+A negative argument ARG = -N means move backward."
+  (interactive "^p")
+  ;;   TODO:
+  ;; With argument ARG, do it ARG times;
+  ;; a negative argument ARG = -N means move backward N paragraphs.
+  (when-let* ((regions (org-ai-block--chat-role-regions))
+              (start (cl-find-if (lambda (x) (>= (point) x)) (reverse regions)))
+              (end (cl-find-if (lambda (x) (< (point) x)) regions)))
+    (print (list start end))
+    (or arg (setq arg 1))
+    (if (> arg 0)
+        (goto-char end)
+      ;; else - backward
+      (let ((prev (cl-find-if (lambda (x) (>= (1- start) x)) (reverse regions))))
+        (print (list (> (point) start) prev))
+        (if (and (> (point) start) ; if at the middle of first section
+                 (not prev))
+            (goto-char start)
+          ;; else
+          (goto-char (cl-find-if (lambda (x) (>= (1- start) x)) (reverse regions))))))))
 
 (defun org-ai-kill-region-at-point (&optional arg)
   "Kills the prompt at point.

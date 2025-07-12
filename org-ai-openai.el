@@ -134,7 +134,9 @@ https://platform.openai.com/account/api-keys."
   :group 'org-ai)
 
 (defcustom org-ai-default-max-tokens-add-recomendation t
-  "Additionally add system recomendation for chat mode about limit."
+  "Additionally add system recomendation for chat mode about limit.
+Function `org-ai-openai--get-lenght-recomendation' is used to create
+prompt."
   :type 'boolean
   :group 'org-ai)
 
@@ -217,11 +219,11 @@ messages."
 ;;   "Internal var that stores the current request buffer.
 ;; For chat completion responses.")
 
-(defvar org-ai--current-request-callback nil
+(defvar org-ai--url-request-callback nil
   "Internal var that stores the current request callback.
 Called within url request buffer, should know about target position,
 that is why defined as lambda with marker.")
-(make-variable-buffer-local 'org-ai--current-request-callback)
+(make-variable-buffer-local 'org-ai--url-request-callback)
 
 (defvar org-ai--current-request-is-streamed nil
   "Whether we expect a streamed response or a single completion payload.")
@@ -529,8 +531,6 @@ whether messages are provided."
         (t
          `(("Authorization" . ,(encode-coding-string (string-join `("Bearer" ,(org-ai--openai-get-token service)) " ") 'utf-8))))))))
 
-;;; - Main
-;; org-ai-stream-completion - old
 
 (defun org-ai-openai--get-lenght-recomendation (max-tokens)
   "Recomendation to limit yourself.
@@ -550,10 +550,10 @@ whether messages are provided."
            (format "Do final answer with %d sentences limit." (/ max-tokens 29)))
           ((and (>= max-tokens 300)
                 (<= max-tokens 1000))
-           (format "Do final answer with %d paragraph or %d pages limit length, but not strict." (/ max-tokens 200) (ceiling (/ max-tokens 600.0))))
-          )
-    )
-)
+           (format "Do final answer with %d paragraph or %d pages limit length, but not strict." (/ max-tokens 200) (ceiling (/ max-tokens 600.0)))))))
+
+;;; - Main
+;; org-ai-stream-completion - old
 
 ;; &optional &key prompt messages context model max-tokens temperature top-p frequency-penalty presence-penalty service stream
 (defun org-ai-api-request-prepare (req-type content end-marker sys-prompt sys-prompt-for-all-messages model max-tokens top-p temperature frequency-penalty presence-penalty service stream)
@@ -585,9 +585,8 @@ Called from `org-ai-interface-step1' in main file.
                                                                (org-ai-openai--get-lenght-recomendation max-tokens)
                                                              )))) ; org-ai-block.el
          ;; TODO: replace with result of `org-ai-agent-callback' call
-         (callback (cond ; set to org-ai--current-request-callback
+         (callback (cond ; set to org-ai--url-request-callback
                     (messages
-                     (org-ai--debug "messages" messages)
                      (lambda (result) (org-ai--insert-stream-response end-marker result t)))
                     ;; - completion
                     (t (lambda (result) (org-ai--insert-single-response end-marker
@@ -664,6 +663,7 @@ Shoult be called with 'TEXT' equal to nil to indicate end of response."
             (setq org-ai--current-insert-position-marker pos))
         ;; - else - DONE
         (org-element-cache-reset)
+        (org-ai-reset-stream-state)
         ;; - special cases for DONE
         (when (or insert-role
                   org-ai-jump-to-end-of-block)
@@ -802,112 +802,116 @@ When `RESPONSE' is nil, it means we are done. `CONTEXT' is the
 context of the special block. `BUFFER' is the buffer to insert
 the response into."
   (org-ai--debug "stream response:" response end-marker org-ai--current-insert-position-marker)
-  (let ((normalized (org-ai--normalize-response response)) ; list of messages
-        (buffer (marker-buffer end-marker))
-        (first-resp org-ai--chat-got-first-response)
-        (pos (or org-ai--current-insert-position-marker
-                 (marker-position end-marker)))
-        (cicm org-ai--currently-inside-code-markers)
-        stop-flag)
-    (unwind-protect ; we need to save variables to url buffer
-        (with-current-buffer buffer ; target buffer with block
-          (save-excursion
-            ;; - LOOP Per message
-            (cl-loop for response in normalized
-                     do (let ((type (org-ai--response-type response)))
-                          ;; - Type of message: error
-                          (when (eq type 'error)
-                            (error (org-ai--response-payload response)))
 
-                          ;; - Make sure we have enough space at end of block, don't write on same line
-                          (goto-char pos)
-                          (when (string-suffix-p "#+end_ai" (buffer-substring-no-properties (point) (line-end-position)))
-                            (insert "\n")
-                            (backward-char))
+  (if (not response)
+      (org-ai-reset-stream-state)
+    ; - else
+    (let ((normalized (org-ai--normalize-response response)) ; list of messages
+          (buffer (marker-buffer end-marker))
+          (first-resp org-ai--chat-got-first-response)
+          (pos (or org-ai--current-insert-position-marker
+                   (marker-position end-marker)))
+          (cicm org-ai--currently-inside-code-markers)
+          stop-flag)
+      (unwind-protect ; we need to save variables to url buffer
+          (with-current-buffer buffer ; target buffer with block
+            (save-excursion
+              ;; - LOOP Per message
+              (cl-loop for response in normalized
+                       do (let ((type (org-ai--response-type response)))
+                            ;; - Type of message: error
+                            (when (eq type 'error)
+                              (error (org-ai--response-payload response)))
 
-                          ;; - Type of message
-                          (cl-case type
-                            (role (let ((role (org-ai--response-payload response)))
-                                    (when (not (string= role org-ai--current-chat-role))
+                            ;; - Make sure we have enough space at end of block, don't write on same line
+                            (goto-char pos)
+                            (when (string-suffix-p "#+end_ai" (buffer-substring-no-properties (point) (line-end-position)))
+                              (insert "\n")
+                              (backward-char))
+
+                            ;; - Type of message
+                            (cl-case type
+                              (role (let ((role (org-ai--response-payload response)))
+                                      (when (not (string= role org-ai--current-chat-role))
+                                        (goto-char pos)
+
+                                        (setq org-ai--current-chat-role role)
+                                        (let ((role (and insert-role (org-ai--response-payload response))))
+                                          (cond
+                                           ((string= role "assistant_reason")
+                                            (insert "\n[AI_REASON]: "))
+                                           ((string= role "assistant")
+                                            (insert "\n[AI]: "))
+                                           ((string= role "user")
+                                            (insert "\n[ME]: "))
+                                           ((string= role "system")
+                                            (insert "\n[SYS]: ")))
+
+                                          (condition-case hook-error
+                                              (run-hook-with-args 'org-ai-after-chat-insertion-hook 'role role pos buffer)
+                                            (error
+                                             (message "Error during \"after-chat-insertion-hook\" for role: %s" hook-error)))
+
+                                          ;; (setq org-ai--current-insert-position-marker (point-marker))
+                                          (setq pos (point))
+                                          ))))
+
+                              (text (let ((text (decode-coding-string (org-ai--response-payload response) 'utf-8)))
                                       (goto-char pos)
-
-                                      (setq org-ai--current-chat-role role)
-                                      (let ((role (and insert-role (org-ai--response-payload response))))
-                                        (cond
-                                         ((string= role "assistant_reason")
-                                          (insert "\n[AI_REASON]: "))
-                                         ((string= role "assistant")
-                                          (insert "\n[AI]: "))
-                                         ((string= role "user")
-                                          (insert "\n[ME]: "))
-                                         ((string= role "system")
-                                          (insert "\n[SYS]: ")))
+                                      (when (or first-resp (not (string= (string-trim text) "")))
+                                        (when (and (not first-resp) (string-prefix-p "```" text))
+                                          ;; start markdown codeblock responses on their own line
+                                          (insert "\n"))
+                                        ;; track if we are inside code markers
+                                        (setq cicm (and (not cicm) ; org-ai--currently-inside-code-markers
+                                                        (string-match-p "```" text)))
+                                        (org-ai--debug response)
+                                        (org-ai--debug text)
+                                        (insert text)
+                                        ;; - "auto-fill" if not in code block
+                                        (when (and org-ai-auto-fill (not cicm))
+                                          (fill-paragraph))
 
                                         (condition-case hook-error
-                                            (run-hook-with-args 'org-ai-after-chat-insertion-hook 'role role pos buffer)
+                                            (run-hook-with-args 'org-ai-after-chat-insertion-hook 'text text pos buffer)
                                           (error
-                                           (message "Error during \"after-chat-insertion-hook\" for role: %s" hook-error)))
-
-                                        ;; (setq org-ai--current-insert-position-marker (point-marker))
-                                        (setq pos (point))
-                                        ))))
-
-                            (text (let ((text (decode-coding-string (org-ai--response-payload response) 'utf-8)))
-                                    (goto-char pos)
-                                    (when (or first-resp (not (string= (string-trim text) "")))
-                                      (when (and (not first-resp) (string-prefix-p "```" text))
-                                        ;; start markdown codeblock responses on their own line
-                                        (insert "\n"))
-                                      ;; track if we are inside code markers
-                                      (setq cicm (and (not cicm) ; org-ai--currently-inside-code-markers
-                                                      (string-match-p "```" text)))
-                                      (org-ai--debug response)
-                                      (org-ai--debug text)
-                                      (insert text)
-                                      ;; - "auto-fill" if not in code block
-                                      (when (and org-ai-auto-fill (not cicm))
-                                        (fill-paragraph))
-
-                                      (condition-case hook-error
-                                          (run-hook-with-args 'org-ai-after-chat-insertion-hook 'text text pos buffer)
-                                        (error
-                                         (message "Error during \"after-chat-insertion-hook\" for text: %s" hook-error)))
-                                      )
-                                    (setq first-resp t)
-                                    ;; (setq org-ai--current-insert-position-marker (point-marker))
-                                    (setq pos (point))
-                                    ))
-
-                            (stop (progn
-                                    ;; (when pos
-                                    (goto-char pos)
-
-                                    ;; (message "inserting user prompt: %" (string= org-ai--current-chat-role "user"))
-                                    (let ((text "\n\n[ME]: "))
-                                      (if insert-role
-                                          (insert text)
-                                        ;; else
-                                        (setq text ""))
-
-                                      (condition-case hook-error
-                                          (run-hook-with-args 'org-ai-after-chat-insertion-hook 'end text pos buffer)
-                                        (error
-                                         (message "Error during \"after-chat-insertion-hook\": %s" hook-error)))
+                                           (message "Error during \"after-chat-insertion-hook\" for text: %s" hook-error)))
+                                        )
+                                      (setq first-resp t)
                                       ;; (setq org-ai--current-insert-position-marker (point-marker))
-                                      (setq pos (point)))
+                                      (setq pos (point))
+                                      ))
 
-                                    (org-element-cache-reset)
-                                    (setq stop-flag t)
-                                    ))))))
-          ;; - without save-excursion - go to the end.
-          (when (and org-ai-jump-to-end-of-block
-                     stop-flag)
-            (goto-char pos)))
-      ;; - after buffer - UNWINDFORMS - save variables to url-buffer
-      (setq org-ai--current-insert-position-marker pos)
-      (setq org-ai--currently-inside-code-markers cicm))
-    ;; - in let
-    normalized))
+                              (stop (progn
+                                      ;; (when pos
+                                      (goto-char pos)
+
+                                      ;; (message "inserting user prompt: %" (string= org-ai--current-chat-role "user"))
+                                      (let ((text "\n\n[ME]: "))
+                                        (if insert-role
+                                            (insert text)
+                                          ;; else
+                                          (setq text ""))
+
+                                        (condition-case hook-error
+                                            (run-hook-with-args 'org-ai-after-chat-insertion-hook 'end text pos buffer)
+                                          (error
+                                           (message "Error during \"after-chat-insertion-hook\": %s" hook-error)))
+                                        ;; (setq org-ai--current-insert-position-marker (point-marker))
+                                        (setq pos (point)))
+
+                                      (org-element-cache-reset)
+                                      (setq stop-flag t)
+                                      ))))))
+            ;; - without save-excursion - go to the end.
+            (when (and org-ai-jump-to-end-of-block
+                       stop-flag)
+              (goto-char pos)))
+        ;; - after buffer - UNWINDFORMS - save variables to url-buffer
+        (setq org-ai--current-insert-position-marker pos)
+        (setq org-ai--currently-inside-code-markers cicm))
+      ;; - in let
+      normalized)))
 ;; org-ai-stream-request - old
 (cl-defun org-ai-api-request (service model callback &optional &key prompt messages max-tokens temperature top-p frequency-penalty presence-penalty stream)
   "Use API to LLM to request and get response.
@@ -927,7 +931,7 @@ buffer local and nil by default:
 `org-ai--chat-got-first-response' - for Stream, bool.
 `org-ai--currently-inside-code-markers' - code block received, bool.
 `org-ai--current-request-is-streamed'
-`org-ai--current-request-callback'
+`org-ai--url-request-callback'
 "
   ;; - `org-ai--insert-stream-response'
 
@@ -968,7 +972,7 @@ buffer local and nil by default:
 
     (org-ai--debug "Main request before, that return a \"urllib buffer\".")
     (let ((url-request-buffer
-           (url-retrieve
+           (url-retrieve ; <- - - - - - - - -  MAIN
             endpoint
             (lambda (_events) ; called with url-request-buffer as current buffer
               (org-ai--debug "url-retrieve callback:" _events)
@@ -988,7 +992,7 @@ buffer local and nil by default:
         (setq org-ai--current-insert-position-marker nil) ; just in case, not shure
         (setq org-ai--chat-got-first-response nil) ; just in case, not shure
         ;; - it is `org-ai--insert-stream-response' or `org-ai--insert-single-response'
-        (setq org-ai--current-request-callback callback)
+        (setq org-ai--url-request-callback callback)
         ;; - `org-ai--url-request-on-change-function', `org-ai-reset-stream-state', `org-ai--current-request-is-streamed'
         (setq org-ai--current-request-is-streamed stream)
 
@@ -1089,8 +1093,8 @@ is the presence penalty.
 Three arguments are passed to each function: the positions of
 the beginning and end of the range of changed text,
 and the length in chars of the pre-change text replaced by that range.
-Call `org-ai--current-request-callback' with data.
-After processing call `org-ai--current-request-callback' with nil.
+Call `org-ai--url-request-callback' with data.
+After processing call `org-ai--url-request-callback' with nil.
 This  callback  here  is `org-ai--insert-stream-response'  for  chat  or
 `org-ai--insert-single-response' for completion.
 Called within url-retrieve buffer."
@@ -1124,15 +1128,14 @@ Called within url-retrieve buffer."
                               ;; (data (json-read))  ; problem: with codepage, becaseu url buffer not utf-8
                               )
                           ;; (org-ai--debug data)
-                          (when org-ai--current-request-callback
-                            (funcall org-ai--current-request-callback data)))
+                          (when org-ai--url-request-callback
+                            (funcall org-ai--url-request-callback data)))
                       (error
                        (setq errored t))))
                   ;; when
-                  (when org-ai--current-request-callback
-                    (funcall org-ai--current-request-callback nil))
+                  (when org-ai--url-request-callback
+                    (funcall org-ai--url-request-callback nil))
                   ;; (org-ai--debug "test2")
-                  (org-ai-reset-stream-state)
                   (message "org-ai request done"))
 
               ;; - else - streamed, multiple json objects prefixed with "data: "
@@ -1159,8 +1162,8 @@ Called within url-retrieve buffer."
                               ;; (org-ai--debug data)
                               (end-of-line)
                               ;; (setq org-ai--debug-data (append org-ai--debug-data (list data)))
-                              (when org-ai--current-request-callback
-                                (funcall org-ai--current-request-callback data))
+                              (when org-ai--url-request-callback
+                                (funcall org-ai--url-request-callback data))
                               (set-marker org-ai--url-buffer-last-position-marker (point)))
                           (error
                            (setq errored t)
@@ -1172,8 +1175,8 @@ Called within url-retrieve buffer."
                     (progn
                       (if (get-buffer tmp-buf)
                                (kill-buffer tmp-buf))
-                      (when org-ai--current-request-callback
-                        (funcall org-ai--current-request-callback nil))
+                      (when org-ai--url-request-callback
+                        (funcall org-ai--url-request-callback nil))
                       (set-marker org-ai--url-buffer-last-position-marker (point))
                       (org-ai-reset-stream-state)
                       (message "org-ai request done"))
@@ -1198,9 +1201,11 @@ Called within url-retrieve buffer."
   (when (and url-buffer (buffer-live-p url-buffer))
     (let (kill-buffer-query-functions) ; set to nil
       (org-ai-reset-stream-state)
-      (kill-buffer org-ai--last-url-request-buffer))
+      (kill-buffer url-buffer))
     ;; (setq org-ai--last-url-request-buffer nil)
     ))
+
+;; (defun org-ai-reset-stream-state ()
 
 (defun org-ai-reset-stream-state ()
   "Reset the stream state.
@@ -1208,7 +1213,7 @@ Should be called within url-retrieve buffer. Danger function."
   (interactive)
   (remove-hook 'after-change-functions #'org-ai--url-request-on-change-function t)
 
-  (setq org-ai--current-request-callback nil)
+  (setq org-ai--url-request-callback nil)
   (setq org-ai--url-buffer-last-position-marker nil)
   (setq org-ai--current-chat-role nil)
   (setq org-ai--current-request-is-streamed nil)
@@ -1286,7 +1291,7 @@ prompt found in `CONTENT-STRING'."
     (goto-char (point-min))
 
     (let* (;; collect all positions before [ME]: and [AI]:
-           (sections (cl-loop while (search-forward-regexp "\\[SYS\\]:\\|\\[ME\\]:\\|\\[AI\\]:\\|\\[AI_REASON\\]:" nil t)
+           (sections (cl-loop while (search-forward-regexp "\\[SYS\\]:\\|\\[ME\\]:\\|\\[ME:\\]\\|\\[AI\\]:\\|\\[AI_REASON\\]:" nil t)
                               collect (save-excursion
                                         (goto-char (match-beginning 0))
                                         (point))))
@@ -1319,11 +1324,15 @@ prompt found in `CONTENT-STRING'."
                               collect (cl-destructuring-bind (type &rest content) (split-string part ":")
                                         (let ((type (string-trim type))
                                               (content (string-trim (string-join content ":"))))
-                                          (list :role (cond ((string= type "[SYS]") 'system)
-                                                            ((string= type "[ME]") 'user)
-                                                            ((string= type "[AI]") 'assistant)
-                                                            (t 'assistant))
-                                                :content content)))))
+                                          (if (string= type "[ME") ; typo by human
+                                            (list :role 'user :content (string-trim (substring content 1)))
+                                            ;; else
+                                            (list :role (cond ((string= type "[SYS]") 'system)
+                                                              ((string= type "[ME]") 'user)
+                                                              ((string= type "[ME") 'user)
+                                                              ((string= type "[AI]") 'assistant)
+                                                              (t 'assistant))
+                                                  :content content))))))
 
            (messages (cl-remove-if-not (lambda (x) (not (string-empty-p (plist-get x :content)))) messages))
 
@@ -1395,6 +1404,11 @@ prompt found in `CONTENT-STRING'."
 (cl-assert
  (equal
   (let ((test-string "[ME]: hello [ME]: world")) (org-ai-openai--collect-chat-messages test-string))
+  '[(:role user :content "hello\nworld")]))
+
+(cl-assert
+ (equal
+  (let ((test-string "[ME]: hello [ME:] world")) (org-ai-openai--collect-chat-messages test-string))
   '[(:role user :content "hello\nworld")]))
 
 ;; (comment

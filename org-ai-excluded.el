@@ -56,7 +56,7 @@
       )
   )))
 
-;; (advice-add 'org-fill-element :after #'org-ai-block--org-fill-element-advice)
+(advice-add 'org-fill-element :after #'org-ai-block--org-fill-element-advice)
 
 (defun org-ai-block--org-element-context-advice (func-call &rest args)
   "For `org-babel-where-is-src-block-result'.
