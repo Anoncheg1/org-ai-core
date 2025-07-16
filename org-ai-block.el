@@ -45,8 +45,8 @@
   "Allow to store url buffer per block.
 Intented for usage with `org-ai-block--copy-header-marker' and keep pairs of
 ( block marker-> url-retrieve buffer).
-Should be used for interactive interrup of request only.")
-(make-variable-buffer-local 'org-ai-block--element-marker-variable-dict)
+Should be used for interactive interrup of request only.
+We use pairs of (block-header-marker url-buffer)")
 
 (when (and (boundp 'org-protecting-blocks) (listp org-protecting-blocks))
   (add-to-list 'org-protecting-blocks "ai"))
@@ -79,7 +79,8 @@ Like `org-in-src-block-p'. Return element."
 `ELEMENT' is the element of the special block. Return an alist of
 key-value pairs.
 Like `org-babel-get-src-block-info' but instead of list return only
-arguments."
+arguments.
+Use ELEMENT only in current moment."
   (let* ((element (or element (org-ai-block-p)))
          (header-start (org-element-property :post-affiliated element))
          (header-end (or (org-element-property :contents-begin element)
@@ -103,7 +104,8 @@ ignoring case."
 `ELEMENT' is the element of the special block.
 
 Will expand noweb templates if an 'org-ai-noweb' property or
-'noweb' header arg is \"yes\""
+'noweb' header arg is \"yes\".
+Use ELEMENT only in current moment."
   (let* ((element (or element (org-ai-block-p)))
          (content-start (org-element-property :contents-begin element))
          (content-end (org-element-property :contents-end element))
@@ -166,11 +168,12 @@ Parameters are sourced from:
                                 ,@(when default-form `(,default-form))))))
      ,@body))
 ;; not used
-(defun org-ai-block--get-contents-end-marker (element)
+(defun org-ai-block--get-content-end-marker (&optional element)
   "Return a marker for the :contents-end property of ELEMENT.
 Used in `org-ai-interface-step1'"
-  (with-current-buffer (org-element-property :buffer element)
-    (let ((contents-end-pos (org-element-property :contents-end element)))
+  (let ((el (or element (org-ai-block-p))))
+    ;; (with-current-buffer (org-element-property :buffer el)
+    (let ((contents-end-pos (org-element-property :contents-end el)))
       (when contents-end-pos
         (copy-marker contents-end-pos)))))
 
@@ -194,6 +197,10 @@ line."
         (if result
             (cl-concatenate 'list (list content-start) (reverse result) (list content-end))
           (list content-start content-end)))))
+
+
+
+;;; -=-= Interactive
 
 
 (defun org-ai-mark-last-region ()
@@ -256,20 +263,65 @@ The numeric `ARG' can be used for killing the last n."
 
 ;; (org-babel-insert-result "test3" '("replace"))
 
-;;; -=-= Progress reporter for multiple requests
+;;; -=-=-=-= TODO: Progress reporter for multiple requests
 
 ;; (defun org-ai-block--progress-reporter-run ()
 
 ;;   )
 
-;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+;;; -=-=-=-= variable-dict
 
-(defun org-ai-block--copy-header-marker ()
-  "Return marker for ai block at current buffer at current positon."
-  (save-excursion
-    (goto-char (org-element-property :contents-begin (org-ai-block-p)))
-    (forward-line -1)
-    (copy-marker (point))))
+(defun org-ai-block-get-header-marker (&optional element)
+  "Return marker for ai block at current buffer at current positon.
+Use ELEMENT only in current moment."
+  (let ((el (or element (org-ai-block-p))))
+    ;; (with-current-buffer (org-element-property :buffer el)
+    (save-excursion
+      (goto-char (org-element-property :contents-begin el))
+      (forward-line -1)
+      (copy-marker (point)))))
+
+(cl-defun org-ai-block--get-variable (&optional &key block-header-marker element)
+  "Get variable associated with ai block header.
+Use ELEMENT only in current moment."
+  (let ((bm (or block-header-marker
+                (org-ai-block-get-header-marker element))))
+    (print "org-ai-block--get-variable bm, varibles, get:")
+    (print  bm)
+    (print org-ai-block--element-marker-variable-dict)
+    (print (alist-get bm org-ai-block--element-marker-variable-dict))
+    (alist-get bm org-ai-block--element-marker-variable-dict nil nil #'equal)))
+
+(cl-defun org-ai-block--set-variable (value &optional &key block-header-marker element)
+  (let ((bm (or block-header-marker
+                (org-ai-block-get-header-marker element))))
+    (if (eq value nil)
+        (setf (alist-get block-header-marker org-ai-block--element-marker-variable-dict nil 'remove #'equal) nil)
+      ;; else
+      (setf (alist-get bm org-ai-block--element-marker-variable-dict nil nil #'equal) value))))
+
+(defun org-ai-block--remove-variable (value)
+  (setq org-ai-block--element-marker-variable-dict
+        (rassq-delete-all value org-ai-block--element-marker-variable-dict))) ; for buffer eq is ok
+
+;; (org-ai-block--set-variable 1 :block-header-marker 'aa)
+;; (org-ai-block--set-variable 2 :block-header-marker 'cc)
+;; (org-ai-block--set-variable 3 :block-header-marker 'bb)
+;; (org-ai-block--get-all-variables)
+;; (print org-ai-block--element-marker-variable-dict)
+;; (org-ai-block--remove-variable 1)
+
+(defun org-ai-block--get-all-variables ()
+  (mapcar #'cdr org-ai-block--element-marker-variable-dict))
+
+(defun org-ai-block--clear-variables ()
+  (setq org-ai-block--element-marker-variable-dict nil))
+
+;; (org-ai-block--set-variable nil 'test)
+;; (org-ai-block--get-variable 'test)
+;; (print org-ai-block--element-marker-variable-dict)
+;;; -=-=-=-= Result
+
 
 (defun org-ai-insert-result (result &optional result-params hash exec-time)
   "Modified `org-babel-insert-result' function.
@@ -366,5 +418,6 @@ TODO: EXEC-TIME."
 )
 ;;
 (provide 'org-ai-block)
+
 
 ;;; org-ai-block.el ends here

@@ -129,7 +129,7 @@ Read Org parameters and send the text content to next step."
   ;; -- 1) Org "Pre-parsing"
   (let* ((element (org-ai-block-p)) ; org-ai-block.el
          (info (org-ai-block-get-info element)) ; ((:max-tokens . 150) (:service . "together") (:model . "xxx")) ; org-ai-block.el
-         (end-marker (org-ai-block--get-contents-end-marker element))
+         ;; (end-marker (org-ai-block--get-content-end-marker element))
          (req-type (org-ai-block--get-request-type info)) ; org-ai-block.el
          (sys-prompt-for-all-messages (or (not (eql 'x (alist-get :sys-everywhere info 'x)))
                                           (org-entry-get-with-inheritance "SYS-EVERYWHERE") ; org
@@ -159,7 +159,7 @@ Read Org parameters and send the text content to next step."
                                               ;; else
                                               (org-ai--stream-supported service model))))
                                 ;; - main call
-                                (funcall org-ai-agent-call req-type content end-marker sys-prompt sys-prompt-for-all-messages ; message
+                                (funcall org-ai-agent-call req-type content element sys-prompt sys-prompt-for-all-messages ; message
                                          model max-tokens top-p temperature frequency-penalty presence-penalty service stream ; model params
                                          )))))
 
@@ -191,7 +191,13 @@ It's designed to \"do the right thing\":
 - If there is speech recorded or played, stop it.
 - If there is currently a running openai request, stop it."
   (interactive)
-  (condition-case _
+  (if org-ai-debug-buffer
+      ;; - all errors
+    (cond
+       ((region-active-p) nil)
+       (t (org-ai-openai-stop-url-request))) ; org-ai-openai.el
+    ;; - suppress error
+    (condition-case _
       (cond
        ((region-active-p) nil)
        ;; ((and (boundp 'org-ai-talk--reading-process) ; org-ai-talk.el
@@ -203,14 +209,13 @@ It's designed to \"do the right thing\":
        ;;  (org-ai-oobabooga-stop)) ; org-ai-oobabooga
        ;; (org-ai--current-request-buffer-for-stream ; org-ai-openai.el
        ;;  (org-ai-interrupt-current-request)) ; org-ai-openai.el
-       (org-ai-block--element-marker-variable-dict ; org-ai-openai.el
-        (org-ai-interrupt-current-request)) ; org-ai-openai.el
+       (t (org-ai-openai-stop-url-request)) ; org-ai-openai.el
        ;; (org-ai--current-request-buffer-for-image ; org-ai-openai-image.el
        ;;  (org-ai-image-interrupt-current-request)) ; org-ai-openai-image.el
        )
-    (error nil)))
+    (error nil))))
 
-(defun org-ai--install-keyboard-quit-advice ()
+(defun org-ai--install-keyboard-quit-advice () ; TODO: make Org only
   "Cancel current request when `keyboard-quit' is called."
   (unless (advice-member-p #'org-ai-keyboard-quit 'keyboard-quit) ; here
     (advice-add 'keyboard-quit :before #'org-ai-keyboard-quit)))

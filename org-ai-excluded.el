@@ -73,3 +73,63 @@ Allow to simplify code by using many org-babel functions."
 (advice-add 'org-element-context :around #'org-ai-block--org-element-context-advice)
 ;; - required?????
 ;; (advice-add 'org-element-at-point :around #'org-ai-block--org-element-context-advice)
+
+
+(defun org-ai-openai--get-greatest-variable (alist)
+    (if (null alist)
+        nil
+      (car (sort alist (lambda (x y) (> (cdr x) (cdr y)))))))
+
+;; (equal (org-ai-openai--get-greatest-variable '((bb . 3) (aa . 2))) '(bb . 3))
+;; (equal (org-ai-openai--get-greatest-variable '((aa . 2) (bb . 3))) '(bb . 3))
+;; (equal (org-ai-openai--get-greatest-variable '((cc . 1)))          '(cc . 1))
+;; (equal (org-ai-openai--get-greatest-variable '())                  nil)
+
+(defun apply-to-old-keys (seconds timed-alist func)
+  "Remove keys from `timed-alist' whose timestamps are older than SECONDS seconds."
+  (let ((current (time-to-seconds (current-time))))
+    (mapc func (seq-filter
+                (lambda (entry)
+                  (<= (- current (time-to-seconds (cdr entry))) seconds))
+                timed-alist)))
+
+(defun org-ai--progress-reporter-update ()
+  "2) interrupt
+3) Remove keys"
+  (apply-to-old-keys org-ai-progress-duration
+                     org-ai-block--element-marker-variable-dict
+                     (lambda ()
+                       )))
+
+
+(defun org-ai--progress-reporter-global-cancel (block-marker &optional failed)
+  "Stop progress notification for element.
+BLOCK-MARKER is marker for ai block header from
+`org-ai-block-get-header-marker'."
+  (org-ai-block--set-variable :value nil :block-header-marker block-marker)
+
+  (when-let ((apply-to-old-keys org-ai-progress-duration
+                                org-ai-block--element-marker-variable-dict
+
+               (time-longest  (org-ai-openai--get-greatest-variable org-ai-block--element-marker-variable-dict))
+  org-ai-block--element-marker-variable-dict
+
+  (when org-ai--current-progress-reporter
+
+    (if failed ; timeout
+        (progn ; from `url-queue-kill-job'
+          ;; (progress-reporter-done org-ai--current-progress-reporter)
+          (progress-reporter-update org-ai--current-progress-reporter nil "- Connection failed")
+          (message (concat org-ai--progress-reporter-waiting-string "- Connection failed"))
+          (setq org-ai--current-progress-reporter nil)
+          (org-ai-interrupt-current-request)
+          ;; (when (buffer-live-p org-ai--last-url-buffer)
+          ;;   (org-ai--kill-query-process))
+          )
+      ;; else success
+      (progress-reporter-done org-ai--current-progress-reporter)
+      (setq org-ai--current-progress-reporter nil)))
+  ;; clear time
+  (when org-ai--current-progress-timer
+    (cancel-timer org-ai--current-progress-timer)
+    (setq org-ai--current-progress-timer-remaining-ticks 0)))
