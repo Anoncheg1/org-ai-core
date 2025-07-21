@@ -13,7 +13,6 @@ Stop it with `org-ai-openai-stop-url-request'.
       (insert "#+begin_ai\n#+end_ai")
       (goto-char (point-min))
       (org-ai-block-p)
-
       ))
   )
 ;;         (org-ai-block--set-variable

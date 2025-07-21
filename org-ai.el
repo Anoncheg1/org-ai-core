@@ -100,7 +100,7 @@
 ;; (require 'org-ai-sd)
 ;; (require 'org-ai-oobabooga)
 
-;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+;;; - Agent function
 
 
 ;; (defun org-ai-agent-mycall (service model prompt)
@@ -112,8 +112,7 @@ TODO: pass callback for writing "
   :group 'org-ai)
 
 
-;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
-;; -= C-c C-c
+;;; - C-c C-c
 (defun org-ai-ctrl-c-ctrl-c ()
   "Main command for #+begin_ai."
   (when-let ((element (org-ai-block-p))) ; org-ai-block.el
@@ -163,8 +162,7 @@ Read Org parameters and send the text content to next step."
                                          model max-tokens top-p temperature frequency-penalty presence-penalty service stream ; model params
                                          )))))
 
-;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
-;; -= M-x org-ai-expand-block
+;;; - M-x org-ai-expand-block
 ;;;###autoload
 (defun org-ai-expand-block (&optional element)
   "Show a temp buffer with what the org-ai block expands to.
@@ -179,8 +177,7 @@ Like `org-babel-expand-src-block'."
                                   (insert expanded))))
       expanded)))
 
-;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
-;; keyboard quit
+;;; - keyboard quit C-g
 
 ;; (defvar org-ai-talk--reading-process)
 
@@ -224,7 +221,9 @@ It's designed to \"do the right thing\":
   "Remove the advice that cancels current request when `keyboard-quit' is called."
   (advice-remove 'keyboard-quit #'org-ai-keyboard-quit)) ; here
 
-;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+(org-ai--install-keyboard-quit-advice) ; here
+
+;;; - Minor mode
 
 (defvar org-ai-mode-map (make-sparse-keymap)
   "Keymap for `org-ai-mode'.")
@@ -236,62 +235,98 @@ It's designed to \"do the right thing\":
   ;; (define-key map (kbd "C-c DEL") 'org-ai-kill-region-at-point) ; org-ai-block.el
   (define-key map (kbd "C-c <backspace>") 'org-ai-kill-region-at-point) ; org-ai-block.el
   ;; (define-key map (kbd (string-join (list "C-c" " r"))) 'org-ai-talk-capture-in-org) ; org-ai-talk.el
+  (define-key map (kbd "C-c ?") 'org-ai-open-request-buffer) ; org-ai-openai.el
   )
 
-;; create a minor-mode for org-mode
 (define-minor-mode org-ai-mode
   "Minor mode for `org-mode' integration with the OpenAI API."
   :init-value nil
-  :lighter " org-ai"
+  :lighter org-ai-mode-line-string ; " org-ai"
   :keymap org-ai-mode-map
   :group 'org-ai
   (add-hook 'org-ctrl-c-ctrl-c-hook #'org-ai-ctrl-c-ctrl-c nil t))
 
-(org-ai--install-keyboard-quit-advice) ; here
-
-;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
-
 (defun org-ai-open-request-buffer ()
-  "A debug helper that opens the url request buffer."
+  "Opens the url request buffer for ai block at current position.
+Call original \"C-c ?\" key if not at ai block."
   (interactive)
-  ;; TODO GET BUFEER
-  (when (url-buffer)
-    (pop-to-buffer url-buffer)))
+  ;; TODO GET BUFEER from list for current block
+
+  (let* ((element (org-ai-block-p))
+         (url-buffer (if element
+                         (org-ai-timers--get-variable (org-ai-block-get-header-marker element))
+                       ;; else
+                       (car (org-ai-timers--get-all-variables)))))
+    (if (or (not element) (not url-buffer))
+        ;; call original Org key
+        (call-interactively (lookup-key org-mode-map (kbd "C-c ?")))
+      ;; else
+      (if url-buffer
+          (let
+              ((display-buffer-base-action
+                (list '(
+                        ;; display-buffer--maybe-same-window  ;FIXME: why isn't this redundant?
+                        display-buffer-reuse-window ; pop up bottom window
+                        display-buffer-in-previous-window ;; IF RIGHT WINDOW EXIST
+                        display-buffer-in-side-window ;; right side window - MAINLY USED
+                        display-buffer--maybe-pop-up-frame-or-window ;; create window
+                        ;; ;; If all else fails, pop up a new frame.
+                        display-buffer-pop-up-frame )
+                      '(window-width . 0.6) ; 80 percent
+                      '(side . right))))
+            (pop-to-buffer url-buffer)
+            (with-current-buffer url-buffer
+              (local-set-key (kbd "C-c ?") 'delete-window)))
+        ;; else
+        (message "No url buffer found.")))))
+
+;;; - Global mode
+;; (defvar org-ai-global-prefix-map (make-sparse-keymap)
+;;   "Keymap for `org-ai-global-mode'.")
+
+;; (let ((map org-ai-global-prefix-map)) ; here
+;;   ;; (define-key map (kbd "p") 'org-ai-on-project) ; org-ai-on-project.el
+;;   ;; (define-key map (kbd "P") 'org-ai-prompt-in-new-buffer) ; org-ai-useful.el
+;;   ;; (define-key map (kbd "r") 'org-ai-on-region) ; org-ai-useful.el
+;;   ;; (define-key map (kbd "c") 'org-ai-refactor-code) ; org-ai-useful.el
+;;   ;; (define-key map (kbd "s") 'org-ai-summarize) ; org-ai-useful.el
+;;   (define-key map (kbd "m") 'org-ai-switch-chat-model) ; org-ai-openai.el
+;;   (define-key map (kbd "!") 'org-ai-open-request-buffer) ; org-ai-openai.el
+;;   ;; (define-key map (kbd "$") 'org-ai-open-account-usage-page) ; org-ai-openai-image.el
+;;   ;; (define-key map (kbd "t") 'org-ai-talk-input-toggle) ; org-ai-talk.el
+;;   ;; (define-key map (kbd "T") 'org-ai-talk-output-toggle) ; org-ai-talk.el
+;;   ;; (define-key map (kbd "R") 'org-ai-talk-read-region) ; org-ai-talk.el
+;;   (define-key map (kbd "SPC") 'org-ai-mark-region-at-point)) ; org-ai-block.el
+
+;; (defvar org-ai-global-mode-map (make-sparse-keymap)
+;;   "Keymap for `org-ai-global-mode'.")
+
+;; (define-key org-ai-global-mode-map (kbd "C-c M-a") org-ai-global-prefix-map) ; here
+
+;; ;;;###autoload
+;; (define-minor-mode org-ai-global-mode
+;;   "Non `org-mode' specific minor mode for the OpenAI API."
+;;   :init-value nil
+;;   :lighter ""
+;;   :global t
+;;   :keymap org-ai-global-mode-map
+;;   :group 'org-ai)
 
 
-(defvar org-ai-global-prefix-map (make-sparse-keymap)
-  "Keymap for `org-ai-global-mode'.")
 
-(let ((map org-ai-global-prefix-map)) ; here
-  ;; (define-key map (kbd "p") 'org-ai-on-project) ; org-ai-on-project.el
-  ;; (define-key map (kbd "P") 'org-ai-prompt-in-new-buffer) ; org-ai-useful.el
-  ;; (define-key map (kbd "r") 'org-ai-on-region) ; org-ai-useful.el
-  ;; (define-key map (kbd "c") 'org-ai-refactor-code) ; org-ai-useful.el
-  ;; (define-key map (kbd "s") 'org-ai-summarize) ; org-ai-useful.el
-  (define-key map (kbd "m") 'org-ai-switch-chat-model) ; org-ai-openai.el
-  (define-key map (kbd "!") 'org-ai-open-request-buffer) ; org-ai-openai.el
-  ;; (define-key map (kbd "$") 'org-ai-open-account-usage-page) ; org-ai-openai-image.el
-  ;; (define-key map (kbd "t") 'org-ai-talk-input-toggle) ; org-ai-talk.el
-  ;; (define-key map (kbd "T") 'org-ai-talk-output-toggle) ; org-ai-talk.el
-  ;; (define-key map (kbd "R") 'org-ai-talk-read-region) ; org-ai-talk.el
-  (define-key map (kbd "SPC") 'org-ai-mark-region-at-point)) ; org-ai-block.el
+;;; - Minor mode - string line
+(defvar org-ai-mode-line-string "")
 
-(defvar org-ai-global-mode-map (make-sparse-keymap)
-  "Keymap for `org-ai-global-mode'.")
+(defun org-ai-update-mode-line (count)
+  (if (and count (> count 0))
+      (setq org-ai-mode-line-string (format " org-ai[%d]" count))
+    ;; else
+    (setq org-ai-mode-line-string " org-ai"))
+  (force-mode-line-update)
+  ;; (propertize (format " org-ai[%d]" count)
+  ;;                   'face (if (> count 0) 'error 'default))
+  )
 
-(define-key org-ai-global-mode-map (kbd "C-c M-a") org-ai-global-prefix-map) ; here
-
-;;;###autoload
-(define-minor-mode org-ai-global-mode
-  "Non `org-mode' specific minor mode for the OpenAI API."
-  :init-value nil
-  :lighter ""
-  :global t
-  :keymap org-ai-global-mode-map
-  :group 'org-ai)
-
-;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
-
+;;; - provide
 (provide 'org-ai)
-
 ;;; org-ai.el ends here

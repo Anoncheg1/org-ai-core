@@ -41,13 +41,6 @@
 (require 'org-element)
 (require 'org-macs)
 
-(defvar org-ai-block--element-marker-variable-dict nil
-  "Allow to store url buffer per block.
-Intented for usage with `org-ai-block--copy-header-marker' and keep pairs of
-( block marker-> url-retrieve buffer).
-Should be used for interactive interrup of request only.
-We use pairs of (block-header-marker url-buffer)")
-
 (when (and (boundp 'org-protecting-blocks) (listp org-protecting-blocks))
   (add-to-list 'org-protecting-blocks "ai"))
 
@@ -167,15 +160,6 @@ Parameters are sourced from:
                                    `(org-entry-get-with-inheritance ,(symbol-name sym))))
                                 ,@(when default-form `(,default-form))))))
      ,@body))
-;; not used
-(defun org-ai-block--get-content-end-marker (&optional element)
-  "Return a marker for the :contents-end property of ELEMENT.
-Used in `org-ai-interface-step1'"
-  (let ((el (or element (org-ai-block-p))))
-    ;; (with-current-buffer (org-element-property :buffer el)
-    (let ((contents-end-pos (org-element-property :contents-end el)))
-      (when contents-end-pos
-        (copy-marker contents-end-pos)))))
 
 
 (defvar org-ai-block--roles-regex "\\[SYS\\]:\\|\\[ME\\]:\\|\\[ME:\\]\\|\\[AI\\]:\\|\\[AI_REASON\\]:")
@@ -263,13 +247,21 @@ The numeric `ARG' can be used for killing the last n."
 
 ;; (org-babel-insert-result "test3" '("replace"))
 
-;;; -=-=-=-= TODO: Progress reporter for multiple requests
+;;; -=-= TODO: Progress reporter for multiple requests
 
 ;; (defun org-ai-block--progress-reporter-run ()
 
 ;;   )
+;;; -=-= Markers
 
-;;; -=-=-=-= variable-dict
+(defun org-ai-block--get-content-end-marker (&optional element)
+  "Return a marker for the :contents-end property of ELEMENT.
+Used in `org-ai-interface-step1'"
+  (let ((el (or element (org-ai-block-p))))
+    ;; (with-current-buffer (org-element-property :buffer el)
+    (let ((contents-end-pos (org-element-property :contents-end el)))
+      (when contents-end-pos
+        (copy-marker contents-end-pos)))))
 
 (defun org-ai-block-get-header-marker (&optional element)
   "Return marker for ai block at current buffer at current positon.
@@ -281,45 +273,6 @@ Use ELEMENT only in current moment."
       (forward-line -1)
       (copy-marker (point)))))
 
-(cl-defun org-ai-block--get-variable (&optional &key block-header-marker element)
-  "Get variable associated with ai block header.
-Use ELEMENT only in current moment."
-  (let ((bm (or block-header-marker
-                (org-ai-block-get-header-marker element))))
-    (print "org-ai-block--get-variable bm, varibles, get:")
-    (print  bm)
-    (print org-ai-block--element-marker-variable-dict)
-    (print (alist-get bm org-ai-block--element-marker-variable-dict))
-    (alist-get bm org-ai-block--element-marker-variable-dict nil nil #'equal)))
-
-(cl-defun org-ai-block--set-variable (value &optional &key block-header-marker element)
-  (let ((bm (or block-header-marker
-                (org-ai-block-get-header-marker element))))
-    (if (eq value nil)
-        (setf (alist-get block-header-marker org-ai-block--element-marker-variable-dict nil 'remove #'equal) nil)
-      ;; else
-      (setf (alist-get bm org-ai-block--element-marker-variable-dict nil nil #'equal) value))))
-
-(defun org-ai-block--remove-variable (value)
-  (setq org-ai-block--element-marker-variable-dict
-        (rassq-delete-all value org-ai-block--element-marker-variable-dict))) ; for buffer eq is ok
-
-;; (org-ai-block--set-variable 1 :block-header-marker 'aa)
-;; (org-ai-block--set-variable 2 :block-header-marker 'cc)
-;; (org-ai-block--set-variable 3 :block-header-marker 'bb)
-;; (org-ai-block--get-all-variables)
-;; (print org-ai-block--element-marker-variable-dict)
-;; (org-ai-block--remove-variable 1)
-
-(defun org-ai-block--get-all-variables ()
-  (mapcar #'cdr org-ai-block--element-marker-variable-dict))
-
-(defun org-ai-block--clear-variables ()
-  (setq org-ai-block--element-marker-variable-dict nil))
-
-;; (org-ai-block--set-variable nil 'test)
-;; (org-ai-block--get-variable 'test)
-;; (print org-ai-block--element-marker-variable-dict)
 ;;; -=-=-=-= Result
 
 

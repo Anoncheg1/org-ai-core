@@ -56,6 +56,10 @@
 ;; Headers = org-ai--get-headers
 ;; Token = org-ai-openai-api-token
 ;;
+;; When we create request we count requests, create two timers global one and local inside url buffer.
+;; When we receive error or final answer we stop local, recount requests and update global.
+;;
+;;
 ;;; Code:
 
 (require 'org)
@@ -65,8 +69,10 @@
 (require 'cl-lib)
 (require 'gv)
 (require 'json)
+(require 'org-ai-block)
+(require 'org-ai-timers)
 
-;;; - Constants
+;;; - Constants, variables
 (defcustom org-ai-jump-to-end-of-block t
   "If non-nil, jump to the end of the block after inserting the completion."
   :type 'boolean
@@ -229,25 +235,6 @@ that is why defined as lambda with marker.")
   "Whether we expect a streamed response or a single completion payload.")
 (make-variable-buffer-local 'org-ai--current-request-is-streamed)
 
-(defvar org-ai--global-progress-reporter nil
-  "Progress-reporter for non-streamed responses to make them less boring.")
-
-(defvar org-ai--global-progress-timer nil
-  "Timer for updating the progress reporter for non-streamed responses to make them less boring.")
-
-(defvar org-ai--global-progress-timer-remaining-ticks 0
-  "The time when the timer started.")
-
-(defcustom org-ai-progress-echo-gap 0.2
-  "Echo update interval."
-  :type 'float
-  :group 'org-ai)
-
-(defcustom org-ai-progress-duration 25
-  "The total duration in seconds for which the timer should run.
-Delay after which it will be killed."
-  :type 'integer
-  :group 'org-ai)
 
 (defvar org-ai-after-chat-insertion-hook nil
   "Hook that is called when a chat response is inserted.
@@ -353,49 +340,60 @@ Heavy to execute."
   "If firt argument of ARGS is a stringwith %s than behave like format.
 Otherwise format every to string and concatenate."
   (when (and org-ai-debug-buffer args)
-    (let* ((buf-exist (get-buffer org-ai-debug-buffer))
-           (bu (or buf-exist (get-buffer-create org-ai-debug-buffer)))
-           (current-window (selected-window))
-           (bu-window (or (get-buffer-window bu)
-                          (display-buffer-in-direction ; exist but hidden
-                           bu
-                           '((direction . left)
-                             (window . new)
-                             (window-width . 0.2)))
-                          (select-window current-window))))
-      (with-current-buffer bu
-        ;; - move point to  to bottom
-        (if buf-exist ; was not created
-            (goto-char (point-max)))
-        ;; ;; - scroll debug buffer down
-        (if bu-window
-            (with-selected-window (get-buffer-window bu)
-              (with-no-warnings
-                (end-of-buffer nil))
-              ;; (recenter '(t))
-              ))
-        ;; ;; - output caller function ( working, but too heavy)
-        ;; (let ((caller
-        ;;        (org-ai--debug-get-caller)))
-        ;;   (when caller
-        ;;     (insert "Din ")
-        ;;     (insert caller)
-        ;;     (insert " :")))
-        ;; - output args
-        (if (and (equal (type-of (car args)) 'string)
-                 (string-match "%s" (car args)))
-            (progn
-              (insert (apply 'format (car args) (cdr args)))
-              (newline))
 
-          ;; else
-          (insert (apply #'concat (mapcar (lambda (arg)
-                                            (if (equal (type-of arg) 'string)
-                                                (format "%s\n" arg)
-                                              (concat (prin1-to-string arg) "\n"))
-                                            ) args)))
-          ;; (newline))
-          )))))
+    (save-excursion
+      (let* ((buf-exist (get-buffer org-ai-debug-buffer))
+             (bu (or buf-exist (get-buffer-create org-ai-debug-buffer)))
+             (current-window (selected-window))
+             (bu-window (or (get-buffer-window bu)
+                            (if (>= (count-windows) 2)
+                                (display-buffer-in-direction ; exist but hidden
+                                 bu
+                                 '((direction . left)
+                                   (window . new)
+                                   (window-width . 0.2)))
+                              ;; else
+                              (display-buffer-in-direction ; exist but hidden
+                               bu
+                               '((direction . left)
+                                 (window . new)
+                                 )))
+                            (select-window current-window))))
+
+        (with-current-buffer bu
+          ;; - move point to  to bottom
+          (if buf-exist ; was not created
+              (goto-char (point-max)))
+          ;; ;; - scroll debug buffer down
+          (if bu-window
+              (with-selected-window (get-buffer-window bu)
+                (with-no-warnings
+                  (end-of-buffer nil))
+                ;; (recenter '(t))
+                ))
+          ;; ;; - output caller function ( working, but too heavy)
+          ;; (let ((caller
+          ;;        (org-ai--debug-get-caller)))
+          ;;   (when caller
+          ;;     (insert "Din ")
+          ;;     (insert caller)
+          ;;     (insert " :")))
+          ;; - output args
+          (save-match-data
+            (if (and (equal (type-of (car args)) 'string)
+                     (string-match "%s" (car args)))
+                (progn
+                  (insert (apply 'format (car args) (cdr args)))
+                  (newline))
+
+              ;; else
+              (insert (apply #'concat (mapcar (lambda (arg)
+                                                (if (equal (type-of arg) 'string)
+                                                    (format "%s\n" arg)
+                                                  (concat (prin1-to-string arg) "\n"))
+                                                ) args)))
+              ;; (newline))
+              )))))))
 
 ;; (org-ai--debug "test %s" 2)
 ;; (org-ai--debug "test" 2 3 "sd")
@@ -600,7 +598,7 @@ Called from `org-ai-interface-step1' in main file.
                                                                         nil))))))
     ;; - Call and save to dict. Removed inside org-ai-api-request.
     (print (list "Before set"  element))
-    (org-ai-block--set-variable
+    (org-ai-timers--progress-reporter-run
      (org-ai-api-request service model callback
                          :prompt content ; if completion
                          :messages messages
@@ -610,7 +608,8 @@ Called from `org-ai-interface-step1' in main file.
                          :frequency-penalty frequency-penalty
                          :presence-penalty presence-penalty
                          :stream stream)
-     :element element)))
+     (org-ai-block-get-header-marker element)
+     #'org-ai-openai--interrupt-url-request)))
 
 
 ;; Together.xyz 2025
@@ -808,17 +807,19 @@ Should be a single process in buffer, because save variables
 
 (defun org-ai--insert-stream-response (end-marker &optional response insert-role)
   "Insert result to ai block for chat mode.
+When first chunk received we stop waiting timer for request.
 END-MARKER'is where to put result,
 RESPONSE is one JSON message of the stream response.
 Used as callback for `org-ai-api-request', called in url buffer.
 When RESPONSE is nil, it means we are done.
-Should be a single process in buffer, because save variables
+Save variables:
 `org-ai--current-insert-position-marker',
 `org-ai--currently-inside-code-markers'
 `org-ai--currently-chat-got-first-response'
-`org-ai--current-chat-role' in current buffer."
+`org-ai--current-chat-role' in current buffer.
+Called within url-buffer."
 
-
+(org-ai--debug "org-ai--insert-stream-response org-ai-reset-stream-state")
   ;; (if (not response)
   ;;     (progn
   ;;       (org-ai--debug "org-ai--insert-stream-response org-ai-reset-stream-state")
@@ -829,8 +830,11 @@ Should be a single process in buffer, because save variables
           (first-resp org-ai--currently-chat-got-first-response)
           (pos (or org-ai--current-insert-position-marker
                    (marker-position end-marker)))
-          (cicm org-ai--currently-inside-code-markers)
+          (c-inside-code-m org-ai--currently-inside-code-markers)
+          (c-chat-role org-ai--current-chat-role)
+          (url-buffer (current-buffer))
           stop-flag)
+      ;; (org-ai--debug "org-ai--insert-stream-response" normalized)
       (unwind-protect ; we need to save variables to url buffer
           (with-current-buffer buffer ; target buffer with block
             (save-excursion
@@ -853,10 +857,10 @@ Should be a single process in buffer, because save variables
                             ;; - Type of message
                             (cl-case type
                               (role (let ((role (org-ai--response-payload response)))
-                                      (when (not (string= role org-ai--current-chat-role))
+                                      (when (not (string= role c-chat-role))
                                         (goto-char pos)
 
-                                        (setq org-ai--current-chat-role role)
+                                        (setq c-chat-role role)
                                         (let ((role (and insert-role (org-ai--response-payload response))))
                                           (cond
                                            ((string= role "assistant_reason")
@@ -884,16 +888,17 @@ Should be a single process in buffer, because save variables
                                           (insert "\n"))
                                         (when first-resp
                                           ;; call stop waiting with url-buffer and progress reporter.
-                                          (org-ai--progress-reporter-current-cancel :element (org-ai-block-p))
+                                          (org-ai--debug "org-ai--insert-stream-response first-resp")
+                                          (org-ai-timers--interrupt-current-request url-buffer)
                                           )
                                         ;; track if we are inside code markers
-                                        (setq cicm (and (not cicm) ; org-ai--currently-inside-code-markers
+                                        (setq c-inside-code-m (and (not c-inside-code-m) ; org-ai--currently-inside-code-markers
                                                         (string-match-p "```" text)))
                                         ;; (org-ai--debug response)
                                         ;; (org-ai--debug text)
                                         (insert text)
                                         ;; - "auto-fill" if not in code block
-                                        (when (and org-ai-auto-fill (not cicm))
+                                        (when (and org-ai-auto-fill (not c-inside-code-m))
                                           (fill-paragraph))
 
                                         (condition-case hook-error
@@ -909,7 +914,7 @@ Should be a single process in buffer, because save variables
                                       ;; (when pos
                                       (goto-char pos)
 
-                                      ;; (message "inserting user prompt: %" (string= org-ai--current-chat-role "user"))
+                                      ;; (message "inserting user prompt: %" (string= c-chat-role "user"))
                                       (let ((text "\n\n[ME]: "))
                                         (if insert-role
                                             (insert text)
@@ -931,7 +936,9 @@ Should be a single process in buffer, because save variables
               (goto-char pos)))
         ;; - after buffer - UNWINDFORMS - save variables to url-buffer
         (setq org-ai--current-insert-position-marker pos)
-        (setq org-ai--currently-inside-code-markers cicm))
+        (setq org-ai--currently-inside-code-markers c-inside-code-m)
+        (setq org-ai--current-chat-role c-chat-role)
+        )
       ;; - in let
       normalized))
 ;; org-ai-stream-request - old
@@ -958,6 +965,10 @@ Parallel requests require to keep `url-request-buffer'
 to be able  to kill it. We  solve this by creating timer  in buffer with
 name of url-request-buffer +1.
 We count running ones in global integer only.
+
+For not stream url return event and hook after-change-functions
+ triggered only after url buffer already kill, that is why we don't use
+ this hook.
 "
 
 
@@ -994,22 +1005,25 @@ We count running ones in global integer only.
            (url-retrieve ; <- - - - - - - - -  MAIN
             endpoint
             (lambda (_events) ; called with url-request-buffer as current buffer
+              "url-request-buffer event"
               ;; called at error or at the end after `after-change-functions' hooks
               (org-ai--debug "url-retrieve callback:" _events)
 
               (org-ai--debug-urllib (current-buffer))
-              (org-ai--url-request-on-change-function nil nil nil) ; process respponse in comppletion mode
 
-              (org-ai--maybe-show-openai-request-error)
-              (remove-hook 'after-change-functions #'org-ai--url-request-on-change-function t)
-              ;; (org-ai-reset-stream-state)
+              ;; Called for not stream and should be handled as read
+              (org-ai--url-request-on-change-function nil nil nil)
+
+              (org-ai--maybe-show-openai-request-error) ; TODO: change to RESULT by global customizable option
+              ;; finally stop track buffer, error or not
+              ;; (org-ai--debug "Main request lambda" _events)
+              (org-ai-timers--interrupt-current-request (current-buffer) #'org-ai-openai--stop-tracking-url-request)
               ))))
 
       (org-ai--debug "Main request after." url-request-buffer)
 
       ;; - run timer that show /-\ looping, notification of status
-      (when (not stream) (org-ai--progress-reporter-run url-request-buffer))
-
+      ;; (when (not stream)
 
 
       (with-current-buffer url-request-buffer ; old org-ai--last-url-request-buffer
@@ -1023,14 +1037,13 @@ We count running ones in global integer only.
         ;; - `org-ai--url-request-on-change-function', `org-ai-reset-stream-state', `org-ai--current-request-is-streamed'
         (setq org-ai--current-request-is-streamed stream)
 
-        ;; - for stream add hook, otherwise remove
+        ;; - for stream add hook, otherwise remove - do word by word output (optional actually)
         (if stream
             (unless (member 'org-ai--url-request-on-change-function after-change-functions)
               (add-hook 'after-change-functions #'org-ai--url-request-on-change-function nil t))
           ;; else - not stream
-          (remove-hook 'after-change-functions #'org-ai--url-request-on-change-function t)))
-
-      ;; - return, not used
+          (remove-hook 'after-change-functions #'org-ai--url-request-on-change-function t))
+        )
       url-request-buffer)))
 
 
@@ -1125,14 +1138,16 @@ After processing call `org-ai--current-url-request-callback' with nil.
 This  callback  here  is `org-ai--insert-stream-response'  for  chat  or
 `org-ai--insert-single-response' for completion.
 Called within url-retrieve buffer."
+  ;; (org-ai--debug "org-ai--url-request-on-change-function: %s %s %s %s" _beg _end _len (current-buffer))
   ;; (with-current-buffer org-ai--last-url-request-buffer
-    (when (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)
-      (save-match-data
-        (save-excursion
-          (if org-ai--url-buffer-last-position-marker
-              (goto-char org-ai--url-buffer-last-position-marker)
-            (goto-char url-http-end-of-headers)
-            (setq org-ai--url-buffer-last-position-marker (point-marker)))
+  (when (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)
+    (save-match-data
+      (save-excursion
+        (if org-ai--url-buffer-last-position-marker
+            (goto-char org-ai--url-buffer-last-position-marker)
+          ;; else
+          (goto-char url-http-end-of-headers)
+          (setq org-ai--url-buffer-last-position-marker (point-marker)))
 
           ;; Avoid a bug where we skip responses because url has modified the http
           ;; buffer and we are not where we think we are.
@@ -1142,73 +1157,82 @@ Called within url-retrieve buffer."
 
           ;; - Non-streamed - response of a single json object
           (if (not org-ai--current-request-is-streamed)
-            (let ((json-object-type 'plist)
-                  (json-key-type 'symbol)
-                  (json-array-type 'vector))
-              (org-ai--progress-reporter-current-cancel :url-buffer (current-buffer)) ; stop timer
-              ;; (condition-case _err
-              (let (
-                    (data (json-read-from-string
-                           (buffer-substring-no-properties
-                            (point) (point-max))))
-                    ;; (data (json-read))  ; problem: with codepage, becaseu url buffer not utf-8
-                    )
-                (when data
-                  (org-ai--debug "on change 1)")
-                  (funcall org-ai--current-url-request-callback data)) ; INSERT CALLBACK!
-                ;; (error
-                ;;  (setq errored t)))
-                )
-              ;; - Done or Error
-              (org-ai--debug "on change 2)")
-              (funcall org-ai--current-url-request-callback nil) ; INSERT CALLBACK!
-              (message "org-ai request done"))
+              (let ((json-object-type 'plist)
+                    (json-key-type 'symbol)
+                    (json-array-type 'vector))
+                (condition-case _err
+                    (let ( ; error
+                          (data (json-read-from-string
+                                 (buffer-substring-no-properties (point) (point-max))))
+                          ;; (data (json-read))  ; problem: with codepage, becaseu url buffer not utf-8
+                          )
+                      (when data
+                        (org-ai--debug "on change 1)")
+                        (funcall org-ai--current-url-request-callback data) ; INSERT CALLBACK!
+                        ;; We call this in lambda "url-request-buffer event" anyway
+                        ;; (org-ai-timers--interrupt-current-request (current-buffer) #'org-ai-openai--stop-tracking-url-request)
+                        ))
+                  (error
+                   nil
+                   )
+                  )
+                ;; - Done or Error
+                (org-ai--debug "on change 2)")
+                (funcall org-ai--current-url-request-callback nil) ; INSERT CALLBACK!
+                (message "org-ai request done"))
 
             ;; - else - streamed, multiple json objects prefixed with "data: "
+            ;; (org-ai--debug "org-ai--url-request-on-change-function 2.1) %s %s" (point) (eolp))
             (let ((errored nil))
               (while (and (not errored)
                           (search-forward "data: " nil t))
-                (let* ((line (buffer-substring-no-properties (point) (line-end-position)))
-                       (tmp-buf "*org-ai--temp*"))
+                (let ((line (buffer-substring-no-properties (point) (line-end-position)))
+                      (tmp-buf "*org-ai--temp*"))
+                  ;; (org-ai--debug "on change 2.2) line: %s" line)
                   ;; (message "...found data: %s" line)
                   (if (not (string= line "[DONE]"))
                       (let ((json-object-type 'plist)
                             (json-key-type 'symbol)
-                            (json-array-type 'vector))
-                        (condition-case _err
-                            (let (
-                                  ;; (data (json-read-from-string line)) ; slow
+                            (json-array-type 'vector)
+                            data)
+                        ;; (data (json-read-from-string line)) ; slow
+                        (setq data (with-current-buffer (get-buffer-create tmp-buf t) ; faster
+                                     (condition-case _err
+                                         (progn
+                                           (erase-buffer)
+                                           (insert line)
+                                           (goto-char (point-min))
+                                           (json-read))
+                                       (error
+                                        (org-ai--debug "org-ai--url-request-on-change-function 2.3) errored")
+                                        (setq errored t)
+                                        (kill-buffer)
+                                        nil))))
+                        ;; (setq org-ai--debug-data (append org-ai--debug-data (list data)))
+                        (when data
+                          (end-of-line)
+                          (set-marker org-ai--url-buffer-last-position-marker (point))
+                          ;; (org-ai--debug (format "on change 3) %s" org-ai--url-buffer-last-position-marker))
+                          (funcall org-ai--current-url-request-callback data) ; INSERT CALLBACK!
+                          ))
 
-                                  (data (with-current-buffer (get-buffer-create tmp-buf t) ; faster
-                                          (erase-buffer)
-                                          (insert line)
-                                          (goto-char (point-min))
-                                          (json-read))))
-                              ;; (org-ai--debug data)
-                              (end-of-line)
-                              ;; (setq org-ai--debug-data (append org-ai--debug-data (list data)))
-                              (when data
-                                (org-ai--debug "on change 3)")
-                                (funcall org-ai--current-url-request-callback data)) ; INSERT CALLBACK!
-                              (set-marker org-ai--url-buffer-last-position-marker (point)))
-                          (error
-                           (setq errored t)
-                           (if (get-buffer tmp-buf)
-                               (kill-buffer tmp-buf))
-                           (when org-ai--url-buffer-last-position-marker
-                             (goto-char org-ai--url-buffer-last-position-marker)))))
-                    ;; - else "DONE" string found
+                    ;; - else "[DONE]" string found
                     (progn
-                      (org-ai--progress-reporter-current-cancel :url-buffer (current-buffer)) ; stop timer
+                      ;; (end-of-line)
+                      (set-marker org-ai--url-buffer-last-position-marker (point))
+                      ;; (setq org-ai--url-buffer-last-position-marker nil)
+                      (org-ai-timers--interrupt-current-request (current-buffer) #'org-ai-openai--stop-tracking-url-request) ; stop timer
+                      ;; (org-ai-timers--interrupt-current-request (current-buffer) #'org-ai-openai--interrupt-url-request) ; stop timer
                       (if (get-buffer tmp-buf)
                           (kill-buffer tmp-buf))
-                      (end-of-line)
-                      (set-marker org-ai--url-buffer-last-position-marker (point))
-                      (org-ai--debug "on change 4)")
+                      ;; (org-ai--debug "on change 4)")
                       (funcall org-ai--current-url-request-callback nil) ; INSERT CALLBACK!
                       ;; (org-ai-reset-stream-state)
                       (message "org-ai request done"))
-                    )))))))))
+                    )))))
+          ;; (goto-char p) ; additional protection
+          ;; (org-ai--debug "org-ai--url-request-on-change-function end")
+          ))))
 
 (defun org-ai--stream-supported (service model)
   "Check if the stream is supported by the service and model.
@@ -1237,19 +1261,21 @@ Called within url-retrieve buffer."
 ;;   (org-ai--progress-reporter-global-cancel (current-buffer))
 ;;   )
 
-;;; -=-= Progress reporter for Single-request ---------------------
+;;; - Reporter & requests interrupt functions
+;; 1) `org-ai-timers--progress-reporter-run' - start global timer
+;; 2) `org-ai-timers--interrupt-current-request' - interrupt, called to stop tracking on-changes or kill buffer
 ;; When  we kill  one buffer  and if  no others  we report  failure or
 ;; success  if there  are  other  we just  continue  and don't  change
 ;; reporter.
-;; - Functions:
+;; Functions:
 ;; Failure by time:
 ;; `org-ai-openai--interrupt-all-url-requests' 'failed
-;; `org-ai--progress-reporter-current-cancel'
+;; `org-ai-timers--interrupt-current-request'
 ;; Success:
-;; `org-ai--progress-reporter-current-cancel'
+;; `org-ai-timers--interrupt-current-request'
 ;; Interactive:
 ;; `org-ai-openai-interrupt-url-request'
-;; - Variables:
+;; Variables:
 ;; - `org-ai--global-progress-reporter' - lambda that return a string,
 ;; - `org-ai--global-progress-timer' - timer that output /-\ to echo area.
 ;; - `org-ai--global-progress-timer-remaining-ticks'.
@@ -1257,171 +1283,58 @@ Called within url-retrieve buffer."
 ;; - `org-ai--current-progress-timer-remaining-ticks'."
 
 (defun org-ai-openai--interrupt-url-request (url-buffer)
-  "Called from `org-ai-openai-stop-url-request',
+  "Remove on-update hook and kill buffer.
+Called from `org-ai-openai-stop-url-request',
 `org-ai-openai--interrupt-all-url-requests'."
-  (when (and url-buffer (buffer-live-p url-buffer))
-    (with-current-buffer url-buffer
-      (remove-hook 'after-change-functions #'org-ai--url-request-on-change-function t))
-    (let (kill-buffer-query-functions) ; set to nil
-      (kill-buffer url-buffer))))
+  (org-ai--debug "org-ai-openai--interrupt-url-request"
+                 (eq (current-buffer) url-buffer)
+                 (buffer-live-p url-buffer))
+  (if (eq (current-buffer) url-buffer)
+      (progn
+        (remove-hook 'after-change-functions #'org-ai--url-request-on-change-function t)
+        (when (and url-buffer (buffer-live-p url-buffer))
+          (kill-buffer url-buffer)))
+    ;; else
+    (when (and url-buffer (buffer-live-p url-buffer))
+      (with-current-buffer url-buffer
+        (remove-hook 'after-change-functions #'org-ai--url-request-on-change-function t))
+      (let (kill-buffer-query-functions) ; set to nil
+        (kill-buffer url-buffer)))))
+
+(defun org-ai-openai--stop-tracking-url-request (url-buffer)
+  "Remove on-update hook and not kill buffer.
+  Called from `org-ai-openai-stop-url-request',
+`org-ai-openai--interrupt-all-url-requests'."
+  (org-ai--debug "org-ai-openai--stop-tracking-url-request"
+                 (eq (current-buffer) url-buffer)
+                 (buffer-live-p url-buffer))
+  (if (eq (current-buffer) url-buffer)
+      (remove-hook 'after-change-functions #'org-ai--url-request-on-change-function t)
+    ;; else
+    (if (and url-buffer (buffer-live-p url-buffer))
+      (with-current-buffer url-buffer
+        (remove-hook 'after-change-functions #'org-ai--url-request-on-change-function t)))))
 
 (cl-defun org-ai-openai-stop-url-request (&optional &key element url-buffer failed)
-  "Interrupt the request for block in current buffer at current position.
-URL lib currently.
-BLOCK-MARKER is marker for ai block header from
-`org-ai-block-get-header-marker'.
-Called in target buffer with block at block position.
-
-Called from `org-ai--current-progress-timer' in url-buffer."
+  "Interrupt the request for ELEMENT or URL-BUFFER.
+If  no ELEMENT  or URL-BUFFER  provided we  use in  current ai  block at
+current position at current buffer.
+Called from `org-ai-timers--progress-reporter-run'."
   (interactive)
-  (org-ai--debug "org-ai-openai-stop-url-request buf, alive?:" (current-buffer) (buffer-live-p (current-buffer)))
-  (if-let* ((el (org-ai-block-p))
-            (ubuf (or url-buffer (org-ai-block--get-variable :element el))))
-    (if (not el) ; called not at from some block, but from elsewhere
-        (org-ai-openai--interrupt-all-url-requests) ; kill all
-      ;; else
-      ;; - Cancel timer and remove buffer from list
-      (org-ai--debug "org-ai-openai-stop-url-request el ubuf" el ubuf)
-      (org-ai--progress-reporter-current-cancel :element el :url-buffer ubuf)
-      ;; - kill buffer
-      (when ubuf
-        (org-ai-openai--interrupt-url-request ubuf)))
-    ;; else
-    (error (format "No el or ebuf %s %s" el ubuf))))
-
-(defvar org-ai--progress-reporter-waiting-string "Waiting for a response")
-
-(defun org-ai--progress-reporter-run (url-buffer)
-  "Start progress notification.
-Run two timers in URL-BUFFER and global one.
-Global one do echo notification, local kill url buffer.
-Called from `org-ai-api-request'.
-
-Set:
-- `org-ai--global-progress-reporter' - lambda that return a string,
-- `org-ai--global-progress-timer' - timer that output /-\ to echo area.
-- `org-ai--global-progress-timer-remaining-ticks'.
-- `org-ai--current-progress-timer' - count life of url buffer,
-- `org-ai--current-progress-timer-remaining-ticks'."
-
-  ; stop global one
-  (if (or org-ai--global-progress-reporter org-ai--global-progress-timer)
-      (org-ai--progress-reporter-global-cancel)
-    ;; else - create new
-    (setq org-ai--global-progress-reporter (make-progress-reporter org-ai--progress-reporter-waiting-string)))
-
-  ;; - precalculate ticks based on duration, 25/ 0.2 = 125 ticks
-  (setq org-ai--global-progress-timer-remaining-ticks
-        (round (/ org-ai-progress-duration org-ai-progress-echo-gap)))
-
-  ;; timer1 - reporter
-  (setq org-ai--global-progress-timer
-        (run-with-timer
-         1.0 org-ai-progress-echo-gap ; start after 1 sec
-         (lambda ()
-           ;; expired?
-           (if (<= org-ai--global-progress-timer-remaining-ticks 0)
-               (org-ai-openai--interrupt-all-url-requests 'failed)
-             ;; else -  ticks -= 1
-             (setq org-ai--global-progress-timer-remaining-ticks
-                   (1- org-ai--global-progress-timer-remaining-ticks))
-             (progress-reporter-update org-ai--global-progress-reporter)))))
-
-  ;; timer2 - request killer
-  (with-current-buffer url-buffer
-    (setq org-ai--current-progress-timer-remaining-ticks
-          org-ai--global-progress-timer-remaining-ticks)
-    (setq org-ai--current-progress-timer
-          (run-with-timer
-           1.0 org-ai-progress-echo-gap ; start after 1 sec
-           (lambda ()
-             ;; expired?
-             (if (<= org-ai--current-progress-timer-remaining-ticks 0)
-                 (org-ai-openai-stop-url-request :failed 'failed)
-               ;; else -  ticks -= 1
-               (setq org-ai--current-progress-timer-remaining-ticks
-                     (1- org-ai--current-progress-timer-remaining-ticks))))))))
-
-(defun org-ai--progress-reporter-global-update (&optional failed)
-  "Count url-buffers and stop reporter if it is empty.
-Called from `org-ai-openai-stop-url-request',
-`org-ai--progress-reporter-current-cancel'."
-  (org-ai--debug "org-ai--progress-reporter-global-update len:"
-                 (length (org-ai-block--get-all-variables))
-                 (org-ai-block--get-all-variables))
-  (when (eql (length (org-ai-block--get-all-variables)) 0)
-    (org-ai--progress-reporter-global-cancel failed)))
-
-(defun org-ai--progress-reporter-global-cancel (&optional failed)
-  "Stop global timer of progress reporter for restart or at success.
-Don't clear list of url-buffers.
-Called in
-`org-ai--progress-reporter-run' for restart,
-`org-ai-openai--interrupt-all-url-requests' for full stop."
-  (org-ai--debug "org-ai--progress-reporter-global-cancel"
-                 org-ai--global-progress-reporter
-                 org-ai--global-progress-timer)
-  ;; finish notifications
-  (when org-ai--global-progress-reporter
-    (if failed ; timeout
-        (progn ; from `url-queue-kill-job'
-          ;; (progress-reporter-done org-ai--global-progress-reporter)
-          (progress-reporter-update org-ai--global-progress-reporter nil "- Connection failed")
-          (message (concat org-ai--progress-reporter-waiting-string "- Connection failed")))
-      ;; else - echo success
-      (progress-reporter-done org-ai--global-progress-reporter))
-    ;; when
-    (setq org-ai--global-progress-reporter nil))
-
-  ;; clear time
-  (when org-ai--global-progress-timer
-    (cancel-timer org-ai--global-progress-timer)
-    (setq org-ai--global-progress-timer-remaining-ticks 0)))
-
-(defun org-ai-openai--interrupt-all-url-requests (&optional failed)
-  "Interrup all url requests and stop global timer
-Called from
-`org-ai-openai-stop-url-request' when not at some block,
-`org-ai--progress-reporter-run' by global timer."
-  (org-ai--debug "org-ai-openai--interrupt-all-url-requests")
-  (mapc (lambda (url-buffer)
-          (org-ai-openai--interrupt-url-request url-buffer))
-        (org-ai-block--get-all-variables))
-
-  (org-ai--progress-reporter-global-cancel failed))
-
-(cl-defun org-ai--progress-reporter-current-cancel (&optional &key element url-buffer)
-  "Stop waiting for request, remove buffer from list, update global timer.
-Called from
-`org-ai--insert-stream-response',
-`org-ai-openai-stop-url-request'."
-  (org-ai--debug "org-ai--progress-reporter-current-cancel1 el buf variables:"
-                 element
-                 url-buffer
-                 (print org-ai-block--element-marker-variable-dict))
-  ;; remove variable
-  (if url-buffer
-      (org-ai-block--remove-variable url-buffer)
-    ;; else
-    (org-ai-block--set-variable nil :element element))
-  ;; clear time
-  (let ((urlbuf (or url-buffer
-                   (org-ai-block--get-variable :element element))))
-     (when (and urlbuf (buffer-live-p urlbuf))
-       (with-current-buffer urlbuf
-         (org-ai--debug "org-ai--progress-reporter-current-cancel2 timer variables:"
-                 org-ai--current-progress-timer
-                 (print org-ai-block--element-marker-variable-dict))
-         ;; stop url-buffer timer
-         (when org-ai--current-progress-timer
-           (cancel-timer org-ai--current-progress-timer)
-           (setq org-ai--current-progress-timer-remaining-ticks 0)))))
-  ;; update global timer
-  (org-ai--progress-reporter-global-update))
+  (org-ai--debug "org-ai-openai-stop-url-request buf, alive?:"
+                 (current-buffer)
+                 (buffer-live-p (current-buffer)))
+  (let* ((element (or element (org-ai-block-p)))
+         (url-buffer (or url-buffer (org-ai-timers--get-variable (org-ai-block-get-header-marker element)))))
+    (if element
+        (if url-buffer
+            (org-ai-timers--interrupt-current-request url-buffer #'org-ai-openai--interrupt-url-request failed))
+        ;; else - called not at from some block, but from elsewhere
+        (org-ai-openai--interrupt-all-url-requests #'org-ai-openai--interrupt-url-request) ; kill all
+      )))
 
 
-
-;; -------------------------------------------------------
+;;; - Others
 
 (defun org-ai-openai--collect-chat-messages (content-string &optional default-system-prompt persistant-sys-prompts max-token-recommendation)
   "Takes `CONTENT-STRING' and splits it by [SYS]:, [ME]:, [AI]: and [AI_REASON]: markers.
@@ -1559,6 +1472,11 @@ prompt found in `CONTENT-STRING'."
   (let ((test-string "[ME]: hello [ME:] world")) (org-ai-openai--collect-chat-messages test-string))
   '[(:role user :content "hello\nworld")]))
 
+;; (org-ai--normalize-response '(id "o3fA4D4-62bZhn-9617f44f6d399d91" object "chat.completion" created 1752904364 model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free" prompt [] choices [(finish_reason "stop" seed 819567834314233700 logprobs nil index 0 message (role "assistant" content "It works: `(2 3 1)` is returned." tool_calls []))] usage (prompt_tokens 131 completion_tokens 14 total_tokens 145 cached_tokens 0)))
+;; (#s(org-ai--response role "assistant") #s(org-ai--response text "It works: `(2 3 1)` is returned.") #s(org-ai--response stop "stop"))
+;; (org-ai--normalize-response '(id "o3f9cZv-4Yz4kd-9617f234fd6f9d91" object "chat.completion" created 1752904277 model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free" prompt [] choices [(finish_reason "stop" seed 589067420664432000 logprobs nil index 0 message (role "assistant" content "`(mapcar 'cdr '((a . 2) (x . 3) (2 . 1)))` returns `(2 3 1)`." tool_calls []))] usage (prompt_tokens 84 completion_tokens 34 total_tokens 118 cached_tokens 0)))
+;; (#s(org-ai--response role "assistant") #s(org-ai--response text "`(mapcar 'cdr '((a . 2) (x . 3) (2 . 1)))` returns `(2 3 1)`.") #s(org-ai--response stop "stop"))
+;; (org-ai--response-type response)
 ;; (comment
 ;;   (with-current-buffer "org-ai-mode-test.org"
 ;;    (org-ai-openai--collect-chat-messages (org-ai-block-get-content))))
@@ -1609,6 +1527,8 @@ inside the assembled prompt string."
                                    :assistant-prefix "Assistant: ")
   "You: user\n\nAssistant: assistant"))
 
+
+(org-ai--normalize-response '(id "o3fA4D4-62bZhn-9617f44f6d399d91" object "chat.completion" created 1752904364 model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free" prompt [] choices [(finish_reason "stop" seed 819567834314233700 logprobs nil index 0 message (role "assistant" content "It works: `(2 3 1)` is returned." tool_calls []))] usage (prompt_tokens 131 completion_tokens 14 total_tokens 145 cached_tokens 0)))
 
 (defun org-ai-switch-chat-model ()
   "Change `org-ai-default-chat-model'."
