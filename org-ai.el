@@ -89,7 +89,7 @@
 ;;  - org-ai-interface-step1 (parse Org and messages)
 ;;  - org-ai-interface-step2 (parse Org, choose callback)
 
-;;; Code:
+;;; Code - includes
 
 (require 'org-ai-block)
 (require 'org-ai-openai)
@@ -102,21 +102,19 @@
 
 ;;; - Agent function
 
-
 ;; (defun org-ai-agent-mycall (service model prompt)
 
 (defcustom org-ai-agent-call #'org-ai-api-request-prepare ; org-ai-openai.el
-  "Pass LLM adjusted information for further agent or LLM's API call.
-TODO: pass callback for writing "
+  "Pass processed org-ai block info to AI assistent or some Emacs agent.
+See `org-ai-interface-step1' and `org-ai-api-request-prepare' for parameters.
+TODO: pass callback for writing."
   :type 'function
   :group 'org-ai)
-
 
 ;;; - C-c C-c
 (defun org-ai-ctrl-c-ctrl-c ()
   "Main command for #+begin_ai."
   (when-let ((element (org-ai-block-p))) ; org-ai-block.el
-    (print "here")
     (org-ai-interface-step1) ; here
     t))
 
@@ -149,10 +147,15 @@ Read Org parameters and send the text content to next step."
                                (presence-penalty nil :type number)
                                (stream "t" :type string))
                               ;; - body with some Org "Post-parsing":
+                              ;; (print (list "SERVICE" service (stringp service) (org-ai--read-service-name service)))
                               (let ((content (org-ai-block-get-content element))
-                                    (service (or (if (stringp service) (org-ai--read-service-name service) service) ; org-ai-openai.el
-                                                 ;; (org-ai--service-of-model model)
-                                                 org-ai-service)) ; org-ai-openai.el
+                                    (service (if (stringp service) ; t
+                                                     (or
+                                                      (org-ai--read-service-name service) ; nil
+                                                      service) ; str ; org-ai-openai.el
+                                                   ;; (org-ai--service-of-model model)
+                                                   ;; else
+                                                   org-ai-service)) ; default ; org-ai-openai.el
                                     (stream (if (and stream (string-equal-ignore-case stream "nil"))
                                                 nil
                                               ;; else
@@ -188,29 +191,32 @@ It's designed to \"do the right thing\":
 - If there is speech recorded or played, stop it.
 - If there is currently a running openai request, stop it."
   (interactive)
-  (if org-ai-debug-buffer
-      ;; - all errors
-    (cond
-       ((region-active-p) nil)
-       (t (org-ai-openai-stop-url-request))) ; org-ai-openai.el
-    ;; - suppress error
-    (condition-case _
-      (cond
-       ((region-active-p) nil)
-       ;; ((and (boundp 'org-ai-talk--reading-process) ; org-ai-talk.el
-       ;;       (fboundp 'org-ai-talk-stop) ; org-ai-talk.el
-       ;;       org-ai-talk--reading-process ; org-ai-talk.el
-       ;;       (process-live-p org-ai-talk--reading-process)) ; org-ai-talk
-       ;;  (org-ai-talk-stop)) ; org-ai-talk
-       ;; (org-ai-oobabooga--current-request ; org-ai-oobabooga
-       ;;  (org-ai-oobabooga-stop)) ; org-ai-oobabooga
-       ;; (org-ai--current-request-buffer-for-stream ; org-ai-openai.el
-       ;;  (org-ai-interrupt-current-request)) ; org-ai-openai.el
-       (t (org-ai-openai-stop-url-request)) ; org-ai-openai.el
-       ;; (org-ai--current-request-buffer-for-image ; org-ai-openai-image.el
-       ;;  (org-ai-image-interrupt-current-request)) ; org-ai-openai-image.el
-       )
-    (error nil))))
+  ;; - if ai mode active in current buffer
+  (if (local-variable-if-set-p 'org-ai-mode)
+      ;; - stop current request
+      (if org-ai-debug-buffer
+          ;; - show all errors in debug mode
+          (cond
+           ((region-active-p) nil)
+           (t (org-ai-openai-stop-url-request))) ; org-ai-openai.el
+        ;; else - suppress error in normal mode
+        (condition-case _
+            (cond
+             ((region-active-p) nil)
+             ;; ((and (boundp 'org-ai-talk--reading-process) ; org-ai-talk.el
+             ;;       (fboundp 'org-ai-talk-stop) ; org-ai-talk.el
+             ;;       org-ai-talk--reading-process ; org-ai-talk.el
+             ;;       (process-live-p org-ai-talk--reading-process)) ; org-ai-talk
+             ;;  (org-ai-talk-stop)) ; org-ai-talk
+             ;; (org-ai-oobabooga--current-request ; org-ai-oobabooga
+             ;;  (org-ai-oobabooga-stop)) ; org-ai-oobabooga
+             ;; (org-ai--current-request-buffer-for-stream ; org-ai-openai.el
+             ;;  (org-ai-interrupt-current-request)) ; org-ai-openai.el
+             (t (org-ai-openai-stop-url-request)) ; org-ai-openai.el
+             ;; (org-ai--current-request-buffer-for-image ; org-ai-openai-image.el
+             ;;  (org-ai-image-interrupt-current-request)) ; org-ai-openai-image.el
+             )
+          (error nil)))))
 
 (defun org-ai--install-keyboard-quit-advice () ; TODO: make Org only
   "Cancel current request when `keyboard-quit' is called."
@@ -246,6 +252,7 @@ It's designed to \"do the right thing\":
   :group 'org-ai
   (add-hook 'org-ctrl-c-ctrl-c-hook #'org-ai-ctrl-c-ctrl-c nil t))
 
+;;;###autoload
 (defun org-ai-open-request-buffer ()
   "Opens the url request buffer for ai block at current position.
 Call original \"C-c ?\" key if not at ai block."
@@ -280,7 +287,20 @@ Call original \"C-c ?\" key if not at ai block."
         ;; else
         (message "No url buffer found.")))))
 
-;;; - Global mode
+;;; - Minor mode - string line
+(defvar org-ai-mode-line-string "")
+
+(defun org-ai-update-mode-line (count)
+  (if (and count (> count 0))
+      (setq org-ai-mode-line-string (format " org-ai[%d]" count))
+    ;; else
+    (setq org-ai-mode-line-string " org-ai"))
+  (force-mode-line-update)
+  ;; (propertize (format " org-ai[%d]" count)
+  ;;                   'face (if (> count 0) 'error 'default))
+  )
+
+;;; - Global mode (old)
 ;; (defvar org-ai-global-prefix-map (make-sparse-keymap)
 ;;   "Keymap for `org-ai-global-mode'.")
 
@@ -314,19 +334,6 @@ Call original \"C-c ?\" key if not at ai block."
 
 
 
-;;; - Minor mode - string line
-(defvar org-ai-mode-line-string "")
-
-(defun org-ai-update-mode-line (count)
-  (if (and count (> count 0))
-      (setq org-ai-mode-line-string (format " org-ai[%d]" count))
-    ;; else
-    (setq org-ai-mode-line-string " org-ai"))
-  (force-mode-line-update)
-  ;; (propertize (format " org-ai[%d]" count)
-  ;;                   'face (if (> count 0) 'error 'default))
-  )
-
-;;; - provide
+;;; provide
 (provide 'org-ai)
 ;;; org-ai.el ends here

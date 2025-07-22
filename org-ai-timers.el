@@ -7,9 +7,9 @@
   :type 'float
   :group 'org-ai)
 
-(defcustom org-ai-timers-duration 25
+(defcustom org-ai-timers-duration 1.0e+INF
   "The total duration in seconds for which the timer should run.
-Delay after which it will be killed."
+Delay after which it will be killed. 1.0e+INF is +infinity."
   :type 'integer
   :group 'org-ai)
 
@@ -230,7 +230,7 @@ Set:
 
   ;; - precalculate ticks based on duration, 25/ 0.2 = 125 ticks
   (setq org-ai-timers--global-progress-timer-remaining-ticks
-        (round (/ org-ai-timers-duration org-ai-timers-echo-gap)))
+        (fround (/ org-ai-timers-duration org-ai-timers-echo-gap)))
 
   ;; - if exist, add remaining ticks
   (when (not org-ai-timers--global-progress-reporter)

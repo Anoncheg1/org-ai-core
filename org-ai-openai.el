@@ -564,18 +564,18 @@ whether messages are provided."
   "Compose API request from data and start a server-sent event stream.
 Call `org-ai-api-request' function as a next step.
 Called from `org-ai-interface-step1' in main file.
-`REQ-TYPE' is completion or chat mostly.
-`CONTENT' is block content, used to create messages or prompt.
-`ELEMENT' is ai block, should be converted to market at once.
-`SYS-PROMPT' first system instruction as a string.
+`REQ-TYPE' symbol - is completion or chat mostly.
+`CONTENT' string - is block content, used to create messages or prompt.
+`ELEMENT' org-element - is ai block, should be converted to market at once.
+`SYS-PROMPT' string - first system instruction as a string.
 `SYS-PROMPT-FOR-ALL-MESSAGES' from `org-ai-default-inject-sys-prompt-for-all-messages' variable.
-`MODEL' is the model to use.
-`MAX-TOKENS' is the maximum number of tokens to generate.
+`MODEL' string - is the model to use.
+`MAX-TOKENS' integer - is the maximum number of tokens to generate.
 `TEMPERATURE' is the temperature of the distribution.
 `TOP-P' is the top-p value.
 `FREQUENCY-PENALTY' is the frequency penalty.
 `PRESENCE-PENALTY' is the presence penalty.
-`SERVICE' string - is the AI cloud service such as 'openai or 'azure-openai'.
+`SERVICE' symbol or string - is the AI cloud service such as 'openai or 'azure-openai'.
 `STREAM' string - as bool, indicates whether to stream the response."
   (org-ai--debug "org-ai-api-request-prepare")
   (let* (
@@ -597,7 +597,6 @@ Called from `org-ai-interface-step1' in main file.
                                                                         (org-ai--get-single-response-text result)
                                                                         nil))))))
     ;; - Call and save to dict. Removed inside org-ai-api-request.
-    (print (list "Before set"  element))
     (org-ai-timers--progress-reporter-run
      (org-ai-api-request service model callback
                          :prompt content ; if completion
@@ -633,31 +632,31 @@ For Completion LLM mode. Used as callback for `org-ai-api-request'."
           (decode-coding-string text 'utf-8)))))
 
 (defun org-ai--insert-single-response (end-marker &optional text insert-role)
-  "Insert result to ai block for completion mode.
+  "Insert result to ai block.
+Should be used in two steps: 1) for insertion of text 2) with TEXT equal
+to nil, for finalizing by setting pointer to the end and insertion of me
+role.
+Here used for completion mode in `org-ai-api-request'.
 END-MARKER is where to put result,
 TEXT is string from the response of OpenAI API extracted with `org-ai--get-single-response-text'.
-END-MARKER is a buffer and position at the end of block.  Used For
-Completion LLM mode as callback for `org-ai-api-request'.
-Shoult be called with TEXT equal to nil to indicate end of response.
-Should be a single process in buffer, because save variables
-`org-ai--current-insert-position-marker' in current buffer."
+END-MARKER is a buffer and position at the end of block."
   (org-ai--debug "org-ai--insert-single-response end-marker, text:" end-marker
                                                  text "")
 
     (let ((buffer (marker-buffer end-marker))
-          (pos (or org-ai--current-insert-position-marker
-                   (marker-position end-marker))))
+          (pos (marker-position end-marker)))
       (org-ai--debug "org-ai--insert-single-response buffer,pos:" buffer pos "")
 
       ;; - write in target buffer
       (if text
           (progn
-            (with-current-buffer buffer
-              ;; set mark to allow user "C-u C-SPC" command to easily select the generated text
-              (unless org-ai--current-insert-position-marker
-                (push-mark end-marker))
+            (with-current-buffer buffer ; Where target ai block located.
+              ;; set mark (point) to allow user "C-u C-SPC" command to easily select the generated text
+              (push-mark end-marker)
               (save-excursion
-                (goto-char pos)
+                ;; - go  to the end of previous line and open new one
+                (goto-char (1- pos))
+                (newline)
                 ;; - Make sure we have enough space at end of block, don't write on same line
                 (when (string-suffix-p "#+end_ai" (buffer-substring-no-properties (point) (line-end-position)))
                   (insert "\n")
@@ -677,19 +676,17 @@ Should be a single process in buffer, because save variables
         ;; - special cases for DONE
         (when (or insert-role
                   org-ai-jump-to-end-of-block)
-
           (with-current-buffer buffer
-
             (when insert-role
               (save-excursion
-                (goto-char (or org-ai--current-insert-position-marker
-                               end-marker))
+                ;; - go  to the end of previous line and open new one
+                (goto-char (1- pos))
+                (newline)
                 (insert "\n\n[ME]: ")
                 (setq pos (point))))
             (when org-ai-jump-to-end-of-block
               (goto-char pos)))
-
-          (setq org-ai--current-insert-position-marker pos)))))
+          ))))
 
 
 ;; Here is an example for how a full sequence of OpenAI responses looks like:
@@ -1326,12 +1323,14 @@ Called from `org-ai-timers--progress-reporter-run'."
                  (buffer-live-p (current-buffer)))
   (let* ((element (or element (org-ai-block-p)))
          (url-buffer (or url-buffer (org-ai-timers--get-variable (org-ai-block-get-header-marker element)))))
-    (if element
-        (if url-buffer
-            (org-ai-timers--interrupt-current-request url-buffer #'org-ai-openai--interrupt-url-request failed))
-        ;; else - called not at from some block, but from elsewhere
-        (org-ai-openai--interrupt-all-url-requests #'org-ai-openai--interrupt-url-request) ; kill all
-      )))
+    (if (and element url-buffer)
+        (progn
+          (org-ai-timers--interrupt-current-request url-buffer #'org-ai-openai--interrupt-url-request failed)
+          t)
+        ;; ;; else - called not at from some block, but from elsewhere
+        ;; (org-ai-openai--interrupt-all-url-requests #'org-ai-openai--interrupt-url-request) ; kill all
+      ;; else
+      nil)))
 
 
 ;;; - Others
