@@ -1,25 +1,12 @@
-;;; org-ai.el --- Refactored Use ChatGPT and other LLMs in org-mode and beyond -*- lexical-binding: t; -*-
+;;; org-ai.el --- Text oriented ai blocks for org-mode. -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2023-2025 Robert Krahn and contributers
 ;; Copyright (C) 2025 github.com/Anoncheg1
 
-;; URL: https://github.com/Anoncheg1/org-aire
-;; Version: 0.1,  Orig. Version: 0.5.6
+;; URL: https://github.com/Anoncheg1/org-ai-core
+;; Version: 0.1,  Orig. Version: 0.5.6 (commit cc4a4eb778e4689573ebd2d472b8164f4477e8b8)
 ;;
-;; Package-Requires: ((emacs "27.1") (websocket "1.15"))
-
-;;; Changes:
-;; - DONE: remove websocket
-;; - DONE: additional should be additional
-;; - DONE: :stream nil/t parameter
-;; - DONE: guide for connecting to custom LLM provider.
-;; - DONE: Guide to add custom functions for text post-processing.
-;; - DONE: make org-ai-block dependent on org and org-ai-openai dependent on url only. separate 'org-ai-block and 'org-ai-openai, for now org-ai-openai dependes on org-ai-block and org.
-;; - TODO: rename all to "file-shit" naming convention
-;; - TODO: make org-ai-variable.el and pass them to -api.el functions as parameters.
-;; - TODO: provide ability to replace url-http with plz or org-ai-openai with llm(plz)
-;; - TODO: implement "#+PROPERTY: var  foo=1" and  "#+begin_ai :var foo=1" and to past to text in [foo]
-;; - TODO: implement expanders for variables like links and references
+;; Package-Requires: ((emacs "27.1"))
 
 ;;; License
 
@@ -58,7 +45,7 @@
 ;; (add-to-list 'load-path "path/to/org-ai")
 ;; (require 'org-ai)
 ;; (add-hook 'org-mode-hook #'org-ai-mode) ; org-ai.el
-;; (setq org-ai-openai-api-token "xxx") ; org-ai-openai.el
+;; (setq org-ai-api-creds-token "xxx") ; org-ai-openai.el
 ;;
 ;; You will need an OpenAI API key.  It can be stored in the format
 ;;   machine api.openai.com login org-ai password <your-api-key>
@@ -88,6 +75,21 @@
 ;; Interface: (Why chain of calls? To not mess with return structures.)
 ;;  - org-ai-interface-step1 (parse Org and messages)
 ;;  - org-ai-interface-step2 (parse Org, choose callback)
+
+;;; Changes:
+
+;; - DONE: remove websocket
+;; - DONE: additional should be additional
+;; - DONE: :stream nil/t parameter
+;; - DONE: guide for connecting to custom LLM provider.
+;; - DONE: Guide to add custom functions for text post-processing.
+;; - DONE: make org-ai-block dependent on org and org-ai-openai dependent on url only. separate 'org-ai-block and 'org-ai-openai, for now org-ai-openai dependes on org-ai-block and org.
+;; - TODO: rename all to "file-shit" naming convention
+;; - TODO: make org-ai-variable.el and pass them to -api.el functions as parameters.
+;; - TODO: provide ability to replace url-http with plz or org-ai-openai with llm(plz)
+;; - TODO: implement "#+PROPERTY: var  foo=1" and  "#+begin_ai :var foo=1" and to past to text in [foo]
+;; - TODO: implement expanders for variables like links and references
+;; - TODO: implement contant-tags "Fix @problems then document the changes in @/CHANGELOG.md" @url, @file, @folder, @header? (Org)
 
 ;;; Code - includes
 
@@ -139,7 +141,10 @@ Read Org parameters and send the text content to next step."
     (org-ai-block--let-params info
                               ;; format: (variable optional-default type)
                               ((service :type identity)
-                               (model (if messages org-ai-default-chat-model org-ai-default-completion-model) :type string) ; org-ai-openai.el
+                               (model (if (eql req-type 'chat)
+                                          (org-ai--get-value-or-string org-ai-creds-chat-model service)
+                                        (org-ai--get-value-or-string org-ai-creds-completion-model service)
+                                      :type string)) ; org-ai-openai.el
                                (max-tokens org-ai-default-max-tokens :type number)
                                (top-p nil :type number)
                                (temperature nil :type number)
@@ -148,10 +153,10 @@ Read Org parameters and send the text content to next step."
                                (stream "t" :type string))
                               ;; - body with some Org "Post-parsing":
                               ;; (print (list "SERVICE" service (stringp service) (org-ai--read-service-name service)))
-                              (let ((content (org-ai-block-get-content element))
+                              (let (
                                     (service (if (stringp service) ; t
                                                      (or
-                                                      (org-ai--read-service-name service) ; nil
+                                                      (intern-soft service) ; nil
                                                       service) ; str ; org-ai-openai.el
                                                    ;; (org-ai--service-of-model model)
                                                    ;; else
@@ -161,7 +166,7 @@ Read Org parameters and send the text content to next step."
                                               ;; else
                                               (org-ai--stream-supported service model))))
                                 ;; - main call
-                                (funcall org-ai-agent-call req-type content element sys-prompt sys-prompt-for-all-messages ; message
+                                (funcall org-ai-agent-call req-type element sys-prompt sys-prompt-for-all-messages ; message
                                          model max-tokens top-p temperature frequency-penalty presence-penalty service stream ; model params
                                          )))))
 
@@ -183,7 +188,6 @@ Like `org-babel-expand-src-block'."
 ;;; - keyboard quit C-g
 
 ;; (defvar org-ai-talk--reading-process)
-
 (defun org-ai-keyboard-quit ()
   "Keyboard quit advice.
 It's designed to \"do the right thing\":
@@ -192,13 +196,14 @@ It's designed to \"do the right thing\":
 - If there is currently a running openai request, stop it."
   (interactive)
   ;; - if ai mode active in current buffer
-  (if (local-variable-if-set-p 'org-ai-mode)
+  (if (and (bound-and-true-p org-ai-mode)
+           (not (minibufferp (window-buffer (selected-window))))) ; not in minubuffer
       ;; - stop current request
       (if org-ai-debug-buffer
           ;; - show all errors in debug mode
           (cond
            ((region-active-p) nil)
-           (t (org-ai-openai-stop-url-request))) ; org-ai-openai.el
+           (t (call-interactively #'org-ai-openai-stop-url-request))) ; org-ai-openai.el
         ;; else - suppress error in normal mode
         (condition-case _
             (cond
@@ -227,8 +232,6 @@ It's designed to \"do the right thing\":
   "Remove the advice that cancels current request when `keyboard-quit' is called."
   (advice-remove 'keyboard-quit #'org-ai-keyboard-quit)) ; here
 
-(org-ai--install-keyboard-quit-advice) ; here
-
 ;;; - Minor mode
 
 (defvar org-ai-mode-map (make-sparse-keymap)
@@ -250,7 +253,13 @@ It's designed to \"do the right thing\":
   :lighter org-ai-mode-line-string ; " org-ai"
   :keymap org-ai-mode-map
   :group 'org-ai
-  (add-hook 'org-ctrl-c-ctrl-c-hook #'org-ai-ctrl-c-ctrl-c nil t))
+  (if org-ai-mode
+      (progn
+        (add-hook 'org-ctrl-c-ctrl-c-hook #'org-ai-ctrl-c-ctrl-c nil 'local)
+        (advice-add 'keyboard-quit :before #'org-ai-keyboard-quit))
+    ;; else - off
+    (remove-hook 'org-ctrl-c-ctrl-c-hook #'org-ai-ctrl-c-ctrl-c 'local)
+    (advice-remove 'keyboard-quit #'org-ai-keyboard-quit)))
 
 ;;;###autoload
 (defun org-ai-open-request-buffer ()
@@ -258,34 +267,29 @@ It's designed to \"do the right thing\":
 Call original \"C-c ?\" key if not at ai block."
   (interactive)
   ;; TODO GET BUFEER from list for current block
-
   (let* ((element (org-ai-block-p))
-         (url-buffer (if element
-                         (org-ai-timers--get-variable (org-ai-block-get-header-marker element))
-                       ;; else
-                       (car (org-ai-timers--get-all-variables)))))
-    (if (or (not element) (not url-buffer))
-        ;; call original Org key
-        (call-interactively (lookup-key org-mode-map (kbd "C-c ?")))
-      ;; else
-      (if url-buffer
-          (let
-              ((display-buffer-base-action
-                (list '(
-                        ;; display-buffer--maybe-same-window  ;FIXME: why isn't this redundant?
-                        display-buffer-reuse-window ; pop up bottom window
-                        display-buffer-in-previous-window ;; IF RIGHT WINDOW EXIST
-                        display-buffer-in-side-window ;; right side window - MAINLY USED
-                        display-buffer--maybe-pop-up-frame-or-window ;; create window
-                        ;; ;; If all else fails, pop up a new frame.
-                        display-buffer-pop-up-frame )
-                      '(window-width . 0.6) ; 80 percent
-                      '(side . right))))
-            (pop-to-buffer url-buffer)
-            (with-current-buffer url-buffer
-              (local-set-key (kbd "C-c ?") 'delete-window)))
-        ;; else
-        (message "No url buffer found.")))))
+         (url-buffer (if element (car (org-ai-timers--get-keys-for-variable (org-ai-block-get-header-marker element))))))
+    (if element
+        (if url-buffer
+            (let
+                ((display-buffer-base-action
+                  (list '(
+                          ;; display-buffer--maybe-same-window  ;FIXME: why isn't this redundant?
+                          display-buffer-reuse-window ; pop up bottom window
+                          display-buffer-in-previous-window ;; IF RIGHT WINDOW EXIST
+                          display-buffer-in-side-window ;; right side window - MAINLY USED
+                          display-buffer--maybe-pop-up-frame-or-window ;; create window
+                          ;; ;; If all else fails, pop up a new frame.
+                          display-buffer-pop-up-frame )
+                        '(window-width . 0.6) ; 80 percent
+                        '(side . right))))
+              (pop-to-buffer url-buffer)
+              (with-current-buffer url-buffer
+                (local-set-key (kbd "C-c ?") 'delete-window)))
+          ;; else
+          (message "No url buffer found."))
+      ;; - else - no element - call original Org key
+      (call-interactively (lookup-key org-mode-map (kbd "C-c ?"))))))
 
 ;;; - Minor mode - string line
 (defvar org-ai-mode-line-string "")

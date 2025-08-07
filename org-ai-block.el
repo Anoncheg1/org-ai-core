@@ -67,6 +67,12 @@ Like `org-in-src-block-p'. Return element."
              do (setq context (org-element-property :parent context))
              finally return context)))
 
+(defun org-ai-block-element-by-marker (marker)
+  (with-current-buffer (marker-buffer marker)
+    (save-excursion
+      (goto-char marker)
+      (org-ai-block-p))))
+
 (defun org-ai-block-get-info (&optional element)
   "Parse the header of #+begin_ai...#+end_ai block.
 `ELEMENT' is the element of the special block. Return an alist of
@@ -98,18 +104,22 @@ ignoring case."
 
 Will expand noweb templates if an 'org-ai-noweb' property or
 'noweb' header arg is \"yes\".
-Use ELEMENT only in current moment."
+Use ELEMENT only in current moment, if buffer modified you will need new
+ELEMENT."
   (let* ((element (or element (org-ai-block-p)))
          (content-start (org-element-property :contents-begin element))
          (content-end (org-element-property :contents-end element))
-         (unexpanded-content (string-trim (buffer-substring-no-properties content-start content-end)))
+         (unexpanded-content (if (or (not content-start) (not content-end))
+                                 (error "Empty block")
+                               ;; else
+                               (string-trim (buffer-substring-no-properties content-start content-end))))
          (info (org-ai-block-get-info element))
          (noweb-control (or (alist-get :noweb info nil)
                             (org-entry-get (point) "org-ai-noweb" 1)
                             "no"))
          (content (if (org-ai-block--string-equal-ignore-case "yes" noweb-control)
                       (org-babel-expand-noweb-references (list "markdown" unexpanded-content))
-                      unexpanded-content)))
+                    unexpanded-content)))
     content))
 
 (defun org-ai-block--get-request-type (info)
@@ -268,10 +278,11 @@ Used in `org-ai-interface-step1'"
 Use ELEMENT only in current moment."
   (let ((el (or element (org-ai-block-p))))
     ;; (with-current-buffer (org-element-property :buffer el)
-    (save-excursion
-      (goto-char (org-element-property :contents-begin el))
-      (forward-line -1)
-      (copy-marker (point)))))
+    (if el
+        (save-excursion
+          (goto-char (org-element-property :contents-begin el))
+          (forward-line -1)
+          (copy-marker (point))))))
 
 ;;; -=-=-=-= Result
 

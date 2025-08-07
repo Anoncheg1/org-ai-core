@@ -282,7 +282,7 @@ Ignoring code blocks that start with '```sometext' and end with '```'."
                     (if (re-search-forward "^[ \t\f]*```[ \t\f]*$" end t) ; ex. "    ```      "
                         (progn
                           (setq block-end (copy-marker (line-beginning-position)))
-                          (my/apply-to-region-lines #'fill-region-as-paragraph beg (marker-position block-start) justify)
+                          (org-ai-optional--apply-to-region-lines #'fill-region-as-paragraph beg (marker-position block-start) justify)
                           (goto-char (marker-position block-end))
                           (forward-line 1)
                           (setq beg (point)))

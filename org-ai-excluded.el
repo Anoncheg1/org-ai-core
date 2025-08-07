@@ -133,3 +133,97 @@ BLOCK-MARKER is marker for ai block header from
   (when org-ai--current-progress-timer
     (cancel-timer org-ai--current-progress-timer)
     (setq org-ai--current-progress-timer-remaining-ticks 0)))
+
+
+(cl-defun org-ai-api-request-sync (service model timeout &optional &key prompt messages max-tokens temperature top-p frequency-penalty presence-penalty)
+  "Return nil or result of `org-ai--normalize-response'.
+To a"
+  (let ((url-request-extra-headers (org-ai--get-headers service))
+        (url-request-method "POST")
+        (endpoint (org-ai--get-endpoint messages service))
+        (url-request-data (org-ai--payload :prompt prompt
+					   :messages messages
+					   :model model
+					   :max-tokens max-tokens
+					   :temperature temperature
+					   :top-p top-p
+					   :frequency-penalty frequency-penalty
+					   :presence-penalty presence-penalty
+					   :service service
+					   :stream nil)))
+    (org-ai--debug "org-ai-api-request-sync endpoint:" endpoint (type-of endpoint)
+                   "request-data:" (org-ai--prettify-json-string url-request-data)
+                   )
+    (let ((url-request-buffer
+           (url-retrieve-synchronously ; <- - - - - - - - -  MAIN
+            endpoint
+            t
+            t
+            timeout)))
+      (if url-request-buffer
+          (with-current-buffer url-request-buffer
+            (org-ai--debug-urllib url-request-buffer)
+            (org-ai--maybe-show-openai-request-error) ; TODO: change to RESULT by global customizable option
+
+            ;; - read from url-buffer
+            (when (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)
+              (goto-char url-http-end-of-headers)
+              (let ((json-object-type 'plist)
+                    (json-key-type 'symbol)
+                    (json-array-type 'vector))
+                (condition-case _err
+                    ;; ;; (#s(org-ai--response role "assistant") #s(org-ai--response text "It seems ") #s(org-ai--response stop "length"))
+                    ;; (let* ((res1 (buffer-substring-no-properties (point) (point-max)))
+                    ;;        (res2 (json-read-from-string res1))
+                    ;;        (res3 (org-ai--normalize-response res2))
+                    ;;        (res4 (nth 1 res3))
+                    ;;        (res5 (org-ai--response-payload res4))
+                    ;;        (res (decode-coding-string res5 'utf-8)))
+                    ;;   res
+                    ;;   )
+                    (decode-coding-string (org-ai--response-payload (nth 1
+                                                                         (org-ai--normalize-response
+                                                                          (json-read-from-string
+                                                                           (buffer-substring-no-properties (point) (point-max))))))
+                                          'utf-8)
+                  (error nil)))))
+        ;; else
+        (print "org-ai-api-request-sync: timeout for request")
+        (org-ai--debug "org-ai-api-request-sync: timeout for request:" service model messages)))))
+
+(let ((service 'together)
+      (model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free")
+      (max-tokens 99)
+      (temperature nil)
+      (top-p nil)
+      (frequency-penalty nil)
+      (presence-penalty nil))
+  (org-ai-api-request-sync service model
+                           99
+                           :messages  (vector (list :role 'system :content "Be good.")
+                                              (list :role 'user :content "How to do staff?"))
+                           :max-tokens max-tokens
+                           :temperature temperature
+                           :top-p top-p
+                           :frequency-penalty frequency-penalty
+                           :presence-penalty presence-penalty))
+
+(defun my/sync-request (messages service model timeout max-tokens top-p temperature frequency-penalty presence-penalty)
+  "Do synchronous request.
+Return string of LLM answer as assistent."
+  (let ((lst '(0 1 2 3)) ; retries
+        ret)
+    (while (and (setq lst (cdr lst)) ; make list shorter
+                (not ret)) ; ret is not nil?
+      ;; second request
+      (setq ret (org-ai-api-request-sync service model timeout
+                                          :messages messages
+                                          :max-tokens max-tokens
+                                          :temperature temperature
+                                          :top-p top-p
+                                          :frequency-penalty frequency-penalty
+                                          :presence-penalty presence-penalty))
+      (setq timeout (* timeout 2)))
+    ret))
+
+(my/sync-request '([(:role system :content "Be helpful. Now, plan research of 3 parts and do only first part to answer this user request:") (:role user :content "How to live?") (:role system :content "Research 2-th part and what was missed before.")] together "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free" 1.0e+INF "How to live?" 20 nil nil nil nil))

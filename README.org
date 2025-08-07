@@ -27,7 +27,7 @@ org-ai-service file:org-aire/org-ai-openai.el:164
 (add-to-list 'load-path "path/to/org-ai")
 (require 'org-ai)
 (add-hook 'org-mode-hook #'org-ai-mode) ; org-ai.el
-(setq org-ai-openai-api-token "xxx") ; org-ai-openai.el
+(setq org-ai-api-creds-token "xxx") ; org-ai-openai.el
 #+end_src
 ** How to use not supported service?
 Redefine functions: org-ai--openai-get-token-auth-source, org-ai--get-endpoint, org-ai--get-headers

@@ -7,9 +7,9 @@
   :type 'float
   :group 'org-ai)
 
-(defcustom org-ai-timers-duration 1.0e+INF
+(defcustom org-ai-timers-duration most-positive-fixnum
   "The total duration in seconds for which the timer should run.
-Delay after which it will be killed. 1.0e+INF is +infinity."
+Delay after which it will be killed."
   :type 'integer
   :group 'org-ai)
 
@@ -35,43 +35,73 @@ Delay after which it will be killed. 1.0e+INF is +infinity."
 (defvar org-ai-timers--element-marker-variable-dict nil
   "Allow to store url buffer per block.
 Intented for usage with `org-ai-block--copy-header-marker' and keep pairs of
-( block marker-> url-retrieve buffer).
+;;old: ( block marker-> url-retrieve buffer).
+(url-retrieve buffero -> header marker).
 Should be used for interactive interrup of request only.
-We use pairs of (block-header-marker url-buffer)")
+We use pairs of (block-header-marker url-buffer)
+`eq' is good for buffers, for markers we should use `equal'")
 
 ;;; - variable-dict
-(defun org-ai-timers--get-variable (block-header-marker)
-  "Get variable for key.
-Key is Indented for usage with `org-ai-block-get-header-marker'.
-Use ELEMENT only in current moment."
-    ;; (print "org-ai-timers--get-variable bm, varibles, get:")
-    ;; (print  bm)
-    ;; (print org-ai-timers--element-marker-variable-dict)
-    ;; (print (alist-get bm org-ai-timers--element-marker-variable-dict))
-    (alist-get block-header-marker org-ai-timers--element-marker-variable-dict nil nil #'equal))
+;; (defun org-ai-timers--get-variable (key)
+;;   "Get variable for key.
+;; Get header-marker (variable) for url-buffer (key).
+;; Key is Indented for usage with `org-ai-block-get-header-marker'.
+;; Use ELEMENT only in current moment."
+;;     (alist-get key org-ai-timers--element-marker-variable-dict nil nil #'equal))
 
-(defun org-ai-timers--set-variable (value block-header-marker)
+
+(defun org-ai-timers--get-keys-for-variable (variable)
+  "Return a list of keys.
+VARIABLE is header-marker or ai block.
+Return list of url-buffers.
+use `org-ai-timers--element-marker-variable-dict'."
+  (seq-uniq (mapcar #'car
+                    (seq-filter (lambda (entry)
+                                  (and (equal (cdr entry) variable)
+                                       (buffer-live-p (car entry))))
+                                org-ai-timers--element-marker-variable-dict))))
+
+;; org-ai-timers--set-variable
+(defun org-ai-timers--set (key value)
   "Assign value to key.
+KEY is  url-buffer, VALUE is header marker.
 Indented for usage with `org-ai-block-get-header-marker'."
     (if (eq value nil)
-        (setf (alist-get block-header-marker org-ai-timers--element-marker-variable-dict nil 'remove #'equal) nil)
+        (setf (alist-get key org-ai-timers--element-marker-variable-dict nil 'remove) nil)
       ;; else
-      (setf (alist-get block-header-marker org-ai-timers--element-marker-variable-dict nil nil #'equal) value)))
+      (setf (alist-get key org-ai-timers--element-marker-variable-dict) value)))
 
 (defun org-ai-timers--remove-variable (value)
+  "Remove buffer."
   (setq org-ai-timers--element-marker-variable-dict
-        (rassq-delete-all value org-ai-timers--element-marker-variable-dict))) ; for buffer eq is ok
+        ;; for buffer eq is ok
+        (rassq-delete-all value org-ai-timers--element-marker-variable-dict)))
 
-;; (org-ai-timers--set-variable 1 :block-header-marker 'aa)
-;; (org-ai-timers--set-variable 2 :block-header-marker 'cc)
-;; (org-ai-timers--set-variable 3 :block-header-marker 'bb)
+(defun org-ai-timers--remove-key (key)
+  "Remove buffer."
+  (setq org-ai-timers--element-marker-variable-dict
+        ;; for buffer eq is ok
+        (assq-delete-all key org-ai-timers--element-marker-variable-dict)))
+
+;; (setq org-ai-timers--element-marker-variable-dict nil)
+;; (org-ai-timers--set 1 'aa)
+;; (org-ai-timers--set-variable 2 'cc)
+;; (org-ai-timers--set-variable 3 'bb)
+;; (org-ai-timers--set-variable (list 3 2) 'bb)
 ;; (org-ai-timers--get-all-variables)
 ;; (print org-ai-timers--element-marker-variable-dict)
-;; (org-ai-timers--remove-variable 1)
+;; (org-ai-timers--remove-variable 'aa)
 
 (defun org-ai-timers--get-all-variables ()
+  "Get all header-makers."
+  (seq-uniq (mapcar #'cdr org-ai-timers--element-marker-variable-dict)))
+
+(defun org-ai-timers--get-all-keys ()
   "Get all url-buffers."
-  (mapcar #'cdr org-ai-timers--element-marker-variable-dict))
+  (seq-uniq
+   (mapcar #'cdr (seq-filter (lambda (entry)
+                               (buffer-live-p (car entry)))
+                             org-ai-timers--element-marker-variable-dict))))
 
 ;; (defun org-ai-timers--clear-variables () ; too simple
 ;;   (setq org-ai-timers--element-marker-variable-dict nil))
@@ -100,12 +130,10 @@ Called in
 
   ;; clear time
   (when org-ai-timers--global-progress-timer
-    (org-ai--debug "org-ai-timers--stop-global-progress-reporter wtf1")
     (cancel-timer org-ai-timers--global-progress-timer)
-    (org-ai--debug "org-ai-timers--stop-global-progress-reporter wtf2")
     (setq org-ai-timers--global-progress-timer nil)
-    (org-ai--debug "org-ai-timers--stop-global-progress-reporter wtf3")
-    (setq org-ai-timers--global-progress-timer-remaining-ticks 0)))
+    (setq org-ai-timers--global-progress-timer-remaining-ticks 0)
+    (org-ai--debug "org-ai-timers--stop-global-progress-reporter" org-ai-timers--global-progress-timer-remaining-ticks)))
 
 (defun org-ai-timers--update-global-progress-reporter (&optional failed)
   "Count url-buffers and stop reporter if it is empty.
@@ -114,9 +142,9 @@ Called from
 `org-ai-timers--interrupt-current-request'
 `org-ai-timers--progress-reporter-run'."
   (org-ai--debug "org-ai-timers--update-global-progress-reporter len:"
-                 (length (org-ai-timers--get-all-variables))
-                 (org-ai-timers--get-all-variables))
-  (let ((count (length (org-ai-timers--get-all-variables))))
+                 (length (org-ai-timers--get-all-keys))
+                 (org-ai-timers--get-all-keys))
+  (let ((count (length (org-ai-timers--get-all-keys))))
     (org-ai-update-mode-line count)
     (when (eql count 0)
       (org-ai-timers--stop-global-progress-reporter failed))))
@@ -130,7 +158,7 @@ Called from
   ;; stop requests
   (mapc (lambda (url-buffer)
           (funcall interrupt-request-func url-buffer))
-        (org-ai-timers--get-all-variables))
+        (org-ai-timers--get-all-keys))
   ;; clear list
   (setq org-ai-timers--element-marker-variable-dict nil)
   ;; (org-ai-timers--clear-variables)
@@ -164,6 +192,8 @@ Called from
 ;;; - Timers Local
 (defun org-ai-timers--interrupt-current-request (url-buffer &optional interrupt-request-func failed)
   "Stop waiting for request, remove buffer from list, update global timer.
+URL-BUFFER one or several buffers.
+Should be called in target buffer with global timer.
 Called from
 `org-ai--insert-stream-response' after receiving first chunk,
 `org-ai--url-request-on-change-function' for  not stream after  reply or
@@ -171,15 +201,23 @@ Called from
 `org-ai-openai-stop-url-request'."
   (org-ai--debug "org-ai-timers--interrupt-current-request"
                  url-buffer
+                 interrupt-request-func
                  (buffer-live-p url-buffer)
                  failed)
   ;;                (print org-ai-block--element-marker-variable-dict))
-  ;; - Remove variable
-  (org-ai-timers--remove-variable url-buffer)
-  ;; ;; else
-  ;; (org-ai-timers--set-variable nil :element element))
-  ;; - Clear time and kill buffer
-  (funcall interrupt-request-func url-buffer)
+  (if (sequencep url-buffer) ;; if several
+      (mapc (lambda (b)
+              (org-ai-timers--remove-key b)
+              (org-ai--debug "org-ai-timers--interrupt-current-request lambda")
+              (funcall interrupt-request-func b))
+            url-buffer)
+    ;; else - if one
+    ;; - Remove variable
+    (org-ai-timers--remove-key url-buffer)
+    ;; ;; else
+    ;; (org-ai-timers--set-variable nil :element element))
+    ;; - Clear time and kill buffer
+    (funcall interrupt-request-func url-buffer))
   ;; (if (or (eq (current-buffer) url-buffer)
   ;;         (not (buffer-live-p url-buffer)))
   ;;     (progn
@@ -208,11 +246,15 @@ Called from
     ;; - Update global timer
     (org-ai-timers--update-global-progress-reporter failed))
 
+
+
 ;;; - Main - constructor
-(defun org-ai-timers--progress-reporter-run (url-buffer header-marker interrupt-request-func)
-  "Start progress notification.
-Run two timers in URL-BUFFER and global one.
-Global one do echo notification, local kill url buffer.
+(defun org-ai-timers--progress-reporter-run (interrupt-request-func)
+  "Start or update progress notification.
+1) Save pair (HEADER-MARKER->URL-BUFFER)
+2) INTERRUPT-REQUEST-FUNC - When timer expired kill all by calling for every buffer.
+Require that url-buffer was saved with org-ai-timers--set, to count them.
+
 Called from `org-ai-api-request'.
 
 Set:
@@ -222,21 +264,21 @@ Set:
 - `org-ai-timers--current-timer' - count life of url buffer,
 - `org-ai-timers--current-timer-remaining-ticks'."
   (org-ai--debug "org-ai-timers--progress-reporter-run")
-  ;; - save buffer
-  (org-ai-timers--set-variable url-buffer header-marker)
   ;; - update mode-line
   ;; (org-ai-timers--update-global-progress-reporter)
-  (org-ai-update-mode-line (length (org-ai-timers--get-all-variables))) ; count
+  (org-ai-update-mode-line (length (org-ai-timers--get-all-keys))) ; count
 
   ;; - precalculate ticks based on duration, 25/ 0.2 = 125 ticks
   (setq org-ai-timers--global-progress-timer-remaining-ticks
         (fround (/ org-ai-timers-duration org-ai-timers-echo-gap)))
 
+  (org-ai--debug "org-ai-timers--progress-reporter-run1")
   ;; - if exist, add remaining ticks
   (when (not org-ai-timers--global-progress-reporter)
     ;; else - create new - reporter
     (setq org-ai-timers--global-progress-reporter (make-progress-reporter org-ai-timers--global-progress-reporter-waiting-string)))
 
+  (org-ai--debug "org-ai-timers--progress-reporter-run2")
   (when (not org-ai-timers--global-progress-timer)
     ;; timer1
     (setq org-ai-timers--global-progress-timer
@@ -276,6 +318,32 @@ Set:
   ;;                    (1- org-ai-timers--current-timer-remaining-ticks))))
   ;;          )))
   )
+
+;; (defun org-ai-timers--with-retry-run (url-buffer recreate-func interrupt-func)
+;;   "Create a timer in the current Emacs buffer.
+;; Kill URL-BUFFER after timeout, recreate request?."
+;;   ;; - precalculate ticks based on duration, 25/ 0.2 = 125 ticks
+;;   (setq org-ai-timers--current-timer-remaining-ticks
+;;               (fround (/ org-ai-timers-duration org-ai-timers-echo-gap)))
+
+;;   ;; - killer timer
+;;   (setq-local org-ai-timers--current-timer
+;;               (run-with-timer
+;;            1.0 org-ai-timers-echo-gap ; start after 1 sec
+;;            (lambda ()
+;;              "timer2 in current buffer"
+;;              ;; expired?
+;;              (if (<= org-ai-timers--current-timer-remaining-ticks 0)
+;;                  (progn
+;;                    (org-ai--debug "org-ai-timers--progress-reporter-run timer2 is expired" (current-buffer) org-ai-timers--current-timer-remaining-ticks)
+;;                    (org-ai-timers--interrupt-current-request url-buffer interrupt-request-func 'failed))
+
+;;                ;; else -  ticks -= 1
+;;                (setq org-ai-timers--current-timer-remaining-ticks
+;;                      (1- org-ai-timers--current-timer-remaining-ticks))))
+;;            )
+
+;;   )
 
 ;;; provide
 (provide 'org-ai-timers)

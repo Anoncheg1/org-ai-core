@@ -35,6 +35,7 @@
 ;; - DONE: remove org-ai-block, org, org-element
 ;; - TODO: rename all functions to convention
 ;; - TODO: rename file to -api.el
+;; - TODO: escame #+end_ai after insert of text in block
 
 
 ;;; Commentary:
@@ -47,19 +48,35 @@
 ;; (org-ai-stream-completion service|model messages|prompt context)
 ;; -> (org-ai-stream-request service messages|prompt callback)
 ;; -> org-ai--get-headers, org-ai--get-endpoint, org-ai--payload, url-retrieve
-;; - org-ai--get-headers = org-ai-openai-api-token = "api-key" or "x-api-key" or "Authorization"
+;; - org-ai--get-headers = org-ai-api-creds-token = "api-key" or "x-api-key" or "Authorization"
 ;; - org-ai--get-endpoint = hardcoded URL or org-ai-openai-chat-endpoint, org-ai-openai-completion-endpoint, org-ai-google-chat-endpoint
 ;; -> callback: (org-ai--insert-stream-response) or (org-ai--insert-single-response)
 ;;
 ;; Main variables:
 ;; URL = org-ai--get-endpoint()  or org-ai-openai-chat-endpoint, org-ai-openai-completion-endpoint, org-ai-google-chat-endpoint
 ;; Headers = org-ai--get-headers
-;; Token = org-ai-openai-api-token
+;; Token = org-ai-api-creds-token
 ;;
 ;; When we create request we count requests, create two timers global one and local inside url buffer.
 ;; When we receive error or final answer we stop local, recount requests and update global.
 ;;
+;; Chat mode
+;; - :message (org-ai-openai--collect-chat-messages ...)
+;; - (org-ai--normalize-response response) -> (cl-loop for response in normalized
+;;   - (setq role (org-ai--response-type response))
+;;   - (setq text (decode-coding-string (org-ai--response-payload response)) 'utf-8)
+;; Completion mode
+;; - :prompt content-string
+;; - (setq text  (decode-coding-string (org-ai--get-single-response-text result) 'utf-8))
 ;;
+;; How requests forced to stop with C-g?
+
+;; We save url-buffer with header marker with
+;; `org-ai-timers--progress-reporter-run' function.  that call:
+;; (org-ai-timers--set-variable url-buffer header-marker) in
+;; `org-ai-timers--interrupt-current-request' we remove buffer from
+;; saved and call (org-ai-openai--interrupt-url-request url-buffer).
+
 ;;; Code:
 
 (require 'org)
@@ -83,11 +100,25 @@
   :type 'boolean
   :group 'org-ai)
 
-(defcustom org-ai-openai-api-token ""
+(defcustom org-ai-service 'openai
+  "Service to use if not specified."
+  :type '(choice (const :tag "OpenAI" openai)
+                 (const :tag "Azure-OpenAI" azure-openai)
+                 (const :tag "perplexity.ai" perplexity.ai)
+                 (const :tag "anthropic" anthropic)
+                 (const :tag "DeepSeek" deepseek)
+                 (const :tag "google" google)
+                 (const :tag "Together" together)
+                 (const :tag "Github" github))
+  :group 'org-ai)
+
+(defcustom org-ai-api-creds-token ""
   "This is your OpenAI API token.
 You need to specify if you do not store the token in
 `auth-sources'.  You can retrieve it at
 https://platform.openai.com/account/api-keys."
+  :type '(choice (string :tag "String value")
+                  (plist :key-type symbol :value-type string :tag "Plist with symbol key and string value"))
   :type 'string
   :group 'org-ai)
 
@@ -99,14 +130,16 @@ https://platform.openai.com/account/api-keys."
 ;;   :type 'boolean
 ;;   :group 'org-ai)
 
-(defcustom org-ai-default-completion-model "text-davinci-003"
+(defcustom org-ai-creds-completion-model "text-davinci-003"
   "The default model to use for completion requests.  See https://platform.openai.com/docs/models for other options."
-  :type 'string
+  :type '(choice (string :tag "String value")
+                  (plist :key-type symbol :value-type string :tag "Plist with symbol key and string value"))
   :group 'org-ai)
 
-(defcustom org-ai-default-chat-model "gpt-4o-mini"
+(defcustom org-ai-creds-chat-model "gpt-4o-mini"
   "The default model to use for chat-gpt requests.  See https://platform.openai.com/docs/models for other options."
-  :type 'string
+  :type '(choice (string :tag "String value")
+                  (plist :key-type symbol :value-type string :tag "Plist with symbol key and string value"))
   :group 'org-ai)
 
 (defcustom org-ai-chat-models '("gpt-4o-mini"
@@ -176,17 +209,6 @@ messages."
 (make-obsolete-variable 'org-ai-default-inject-sys-prompt-for-all-messages
                         "With newer ChatGPT versions this is no longer necessary."
                         "2023-12-26")
-
-(defcustom org-ai-service 'openai
-  "Service to use if not specified."
-  :type '(choice (const :tag "OpenAI" openai)
-                 (const :tag "Azure-OpenAI" azure-openai)
-                 (const :tag "perplexity.ai" perplexity.ai)
-                 (const :tag "anthropic" anthropic)
-                 (const :tag "DeepSeek" deepseek)
-                 (const :tag "google" google)
-                 (const :tag "Together" together))
-  :group 'org-ai)
 
 (defvar org-ai-openai-chat-endpoint "https://api.openai.com/v1/chat/completions")
 
@@ -286,9 +308,10 @@ fourth - target buffer with ai block for third position.")
 ;;    (goto-char (cadr (nth n org-ai--debug-data-raw)))
 ;;    (beginning-of-line)))
 
-(defcustom org-ai-debug-buffer "*debug-org-ai*"
-  "If non-nil, enable debuging to a debug buffer."
-  :type 'boolean
+(defcustom org-ai-debug-buffer nil
+  "If non-nil, enable debuging to a debug buffer.
+  Set to something like *debug-org-ai*. to enable debugging."
+  :type 'string
   :group 'org-ai)
 
 ;;; - debugging
@@ -434,9 +457,9 @@ Argument SOURCE-BUF url-http response buffer."
     (unless (member model org-ai-chat-models)
       (message "Model '%s' is not in the list of available models. Maybe this is because of a typo or maybe we haven't yet added it to the list. To disable this message add (add-to-list 'org-ai-chat-models \"%s\") to your init file." model model))))
 
-(defun org-ai--read-service-name (name)
-  "Map a service NAME such as 'openai' to a valid `org-ai-service' symbol."
-  (intern-soft name))
+;; (defmacro org-ai--read-service-name (name)
+;;   "Map a service NAME such as 'openai' to a valid `org-ai-service' symbol."
+;;   ,(intern-soft ,name))
 
 ;; (defun org-ai--service-of-model (model)
 ;;   "Return the service of the model.
@@ -454,17 +477,45 @@ Argument SOURCE-BUF url-http response buffer."
 
 (defun org-ai--openai-get-token (service)
   "Try to get the openai token.
-Either from `org-ai-openai-api-token' or from auth-source.
+Either from `org-ai-api-creds-token' or from auth-source.
 Optional argument SERVICE of token."
-  (or (and
-       (stringp org-ai-openai-api-token)
-       (not (string-empty-p org-ai-openai-api-token))
-       org-ai-openai-api-token)
-      (and
-       ;; org-ai-use-auth-source
-       (org-ai--openai-get-token-auth-source service))
-      (error "Please set `org-ai-openai-api-token' to your OpenAI API token or setup auth-source (see org-ai readme)")))
+  (cond ((and (stringp org-ai-api-creds-token)
+              (not (string-empty-p org-ai-api-creds-token)))
+         org-ai-api-creds-token)
+        ((plistp org-ai-api-creds-token)
+         (or (plist-get org-ai-api-creds-token
+                        ;; convert symbol to keyword
+                        (intern (concat ":"
+                                        (if (symbolp service)
+                                            (symbol-name service)
+                                          ;; else
+                                          service))))
+             (error "Token not found in defined plist `org-ai-api-creds-token'.")))
+        ((and
+          ;; org-ai-use-auth-source
+          (org-ai--openai-get-token-auth-source service)))
+        (t
+         (error "Please set `org-ai-api-creds-token' to your OpenAI API token or setup auth-source (see org-ai readme)"))))
 
+(defmacro org-ai--get-value-or-string (var key)
+  "Retrieve value from VAR using KEY if VAR is a plist, or return VAR if it's a string.
+VAR is the variable name to evaluate.
+KEY is a string used as a key (converted to key symbol with : character)
+if VAR is a plist."
+  `(cond ((plistp ,var)
+          (plist-get ,var (intern (concat ":" ,key))))
+         ((stringp ,var)
+          ,var)
+         (t nil)))
+
+;; (defun org-ai--openai-get-chat-model (service)
+;;   "Allow to set default model as one string or per service."
+
+;; )
+;; (defun org-ai--openai-get-completion-model (service)
+;;   "Allow to set default model as one string or per service."
+
+;; )
 
 (defun org-ai--strip-api-url (url)
   "Strip the leading https:// and trailing / from an URL."
@@ -496,6 +547,7 @@ Optional argument SERVICE of token."
     (anthropic		"https://api.anthropic.com/v1/messages")
     (google		"https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
     (together		"https://api.together.xyz/v1/chat/completions")
+    (github		"https://models.github.ai/inference/chat/completions")
     )
   "Endpoints for services.
   This is a not ordered list of key-value pairs in format of List of
@@ -550,9 +602,9 @@ whether messages are provided."
     (cond ((< max-tokens 75)
            (format "Do final answer with %d words limit." (* max-tokens 0.75)))
           ((and (>= max-tokens 75)
-                (< max-tokens 300))
+                (< max-tokens 500))
            (format "Do final answer with %d sentences limit." (/ max-tokens 29)))
-          ((and (>= max-tokens 300)
+          ((and (>= max-tokens 500)
                 (<= max-tokens 1000))
            (format "Do final answer with %d paragraph or %d pages limit length, but not strict." (/ max-tokens 200) (ceiling (/ max-tokens 600.0)))))))
 
@@ -560,25 +612,25 @@ whether messages are provided."
 ;; org-ai-stream-completion - old
 
 ;; &optional &key prompt messages context model max-tokens temperature top-p frequency-penalty presence-penalty service stream
-(defun org-ai-api-request-prepare (req-type content element sys-prompt sys-prompt-for-all-messages model max-tokens top-p temperature frequency-penalty presence-penalty service stream)
+(defun org-ai-api-request-prepare (req-type element sys-prompt sys-prompt-for-all-messages model max-tokens top-p temperature frequency-penalty presence-penalty service stream)
   "Compose API request from data and start a server-sent event stream.
 Call `org-ai-api-request' function as a next step.
 Called from `org-ai-interface-step1' in main file.
 `REQ-TYPE' symbol - is completion or chat mostly.
-`CONTENT' string - is block content, used to create messages or prompt.
 `ELEMENT' org-element - is ai block, should be converted to market at once.
 `SYS-PROMPT' string - first system instruction as a string.
 `SYS-PROMPT-FOR-ALL-MESSAGES' from `org-ai-default-inject-sys-prompt-for-all-messages' variable.
 `MODEL' string - is the model to use.
 `MAX-TOKENS' integer - is the maximum number of tokens to generate.
-`TEMPERATURE' is the temperature of the distribution.
-`TOP-P' is the top-p value.
-`FREQUENCY-PENALTY' is the frequency penalty.
-`PRESENCE-PENALTY' is the presence penalty.
+`TEMPERATURE' integer - 0-2 lower - more deterministic.
+`TOP-P' integer - 0-1 lower - more deterministic.
+`FREQUENCY-PENALTY' integer - -2-2, lower less repeat words.
+`PRESENCE-PENALTY' integer - -2-2, lower less repeat concepts.
 `SERVICE' symbol or string - is the AI cloud service such as 'openai or 'azure-openai'.
 `STREAM' string - as bool, indicates whether to stream the response."
   (org-ai--debug "org-ai-api-request-prepare")
   (let* (
+         (content (string-trim (org-ai-block-get-content element))) ; string - is block content
          (messages (unless (eql req-type 'completion)
                      ;; - split content to messages
                      (org-ai-openai--collect-chat-messages content
@@ -596,8 +648,8 @@ Called from `org-ai-interface-step1' in main file.
                     (t (lambda (result) (org-ai--insert-single-response end-marker
                                                                         (org-ai--get-single-response-text result)
                                                                         nil))))))
-    ;; - Call and save to dict. Removed inside org-ai-api-request.
-    (org-ai-timers--progress-reporter-run
+    ;; - Call and save buffer.
+    (org-ai-timers--set
      (org-ai-api-request service model callback
                          :prompt content ; if completion
                          :messages messages
@@ -607,8 +659,12 @@ Called from `org-ai-interface-step1' in main file.
                          :frequency-penalty frequency-penalty
                          :presence-penalty presence-penalty
                          :stream stream)
-     (org-ai-block-get-header-marker element)
-     #'org-ai-openai--interrupt-url-request)))
+     (org-ai-block-get-header-marker element))
+
+    ;; - run timer that show /-\ looping, notification of status
+    (org-ai-timers--progress-reporter-run
+     #'org-ai-openai--interrupt-url-request
+     )))
 
 
 ;; Together.xyz 2025
@@ -619,7 +675,7 @@ Called from `org-ai-interface-step1' in main file.
 (defun org-ai--get-single-response-text (&optional response)
   "Return text from response or nil and signal error if it have \"error\" field.
 For Completion LLM mode. Used as callback for `org-ai-api-request'."
-  (org-ai--debug "org-ai--get-single-response-text response:" response)
+  ;; (org-ai--debug "org-ai--get-single-response-text response:" response)
   (when response
     (if-let ((error (plist-get response 'error)))
         (if-let ((message (plist-get error 'message))) (error message) (error error))
@@ -631,7 +687,18 @@ For Completion LLM mode. Used as callback for `org-ai-api-request'."
           ;; - Decode text
           (decode-coding-string text 'utf-8)))))
 
-(defun org-ai--insert-single-response (end-marker &optional text insert-role)
+(cl-assert
+ (equal
+  (let ((test-val
+         '(id "nz7KyaB-3NKUce-9539d1912ce8b148" object "chat.completion" created 1750575101 model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free" prompt []
+              choices [(finish_reason "length" seed 3309196889559996400 logprobs nil index 0
+                                      message (role "assistant" content " The answer is simple: live a long time. But how do you do that? Well, itâs not as simple as it sounds." tool_calls []))] usage (prompt_tokens 5 completion_tokens 150 total_tokens 155 cached_tokens 0))
+         )) (org-ai--get-single-response-text test-val))
+  " The answer is simple: live a long time. But how do you do that? Well, itâs not as simple as it sounds."))
+
+
+
+(defun org-ai--insert-single-response (end-marker &optional text insert-role final)
   "Insert result to ai block.
 Should be used in two steps: 1) for insertion of text 2) with TEXT equal
 to nil, for finalizing by setting pointer to the end and insertion of me
@@ -639,7 +706,8 @@ role.
 Here used for completion mode in `org-ai-api-request'.
 END-MARKER is where to put result,
 TEXT is string from the response of OpenAI API extracted with `org-ai--get-single-response-text'.
-END-MARKER is a buffer and position at the end of block."
+END-MARKER is a buffer and position at the end of block.
+FINAL wherer to finalize, also applied if no text provided."
   (org-ai--debug "org-ai--insert-single-response end-marker, text:" end-marker
                                                  text "")
 
@@ -649,44 +717,50 @@ END-MARKER is a buffer and position at the end of block."
 
       ;; - write in target buffer
       (if text
-          (progn
-            (with-current-buffer buffer ; Where target ai block located.
-              ;; set mark (point) to allow user "C-u C-SPC" command to easily select the generated text
-              (push-mark end-marker)
-              (save-excursion
-                ;; - go  to the end of previous line and open new one
-                (goto-char (1- pos))
-                (newline)
-                ;; - Make sure we have enough space at end of block, don't write on same line
-                (when (string-suffix-p "#+end_ai" (buffer-substring-no-properties (point) (line-end-position)))
-                  (insert "\n")
-                  (backward-char))
-                (insert text)
-                (condition-case hook-error
-                    (run-hook-with-args 'org-ai-after-chat-insertion-hook 'end text pos buffer)
-                  (error
-                   (message "Error during \"after-chat-insertion-hook\": %s" hook-error)))
-                (setq pos (point))))
+          (with-current-buffer buffer ; Where target ai block located.
+            ;; set mark (point) to allow user "C-u C-SPC" command to easily select the generated text
+            (push-mark end-marker)
+            (save-excursion
+              ;; - go  to the end of previous line and open new one
+              (goto-char pos)
+              (if (bolp)
+                  (goto-char (1- pos)))
+              (newline)
+              ;; - Make sure we have enough space at end of block, don't write on same line
+              (when (string-suffix-p "#+end_ai" (buffer-substring-no-properties (point) (line-end-position)))
+                (insert "\n")
+                (backward-char))
+              (insert text)
+              (set-marker end-marker (point))
+              (condition-case hook-error
+                  (run-hook-with-args 'org-ai-after-chat-insertion-hook 'end text pos buffer)
+                (error
+                 (message "Error during \"after-chat-insertion-hook\": %s" hook-error)))
+              (when final
+                (org-element-cache-reset)
+                (undo-boundary))
+              (setq pos (point))))
 
-            ;; - save in url buffer
-            (setq org-ai--current-insert-position-marker pos))
+            ;; ;; - save in url buffer. for what?
+            ;; (setq org-ai--current-insert-position-marker pos)
+
         ;; - else - DONE
-        (org-element-cache-reset)
         ;; (org-ai-reset-stream-state)
         ;; - special cases for DONE
-        (when (or insert-role
-                  org-ai-jump-to-end-of-block)
-          (with-current-buffer buffer
-            (when insert-role
-              (save-excursion
-                ;; - go  to the end of previous line and open new one
-                (goto-char (1- pos))
-                (newline)
-                (insert "\n\n[ME]: ")
-                (setq pos (point))))
-            (when org-ai-jump-to-end-of-block
-              (goto-char pos)))
-          ))))
+        (with-current-buffer buffer
+          (when insert-role
+            (save-excursion
+              ;; - go  to the end of previous line and open new one
+              (goto-char (1- pos))
+              (newline)
+              (insert "\n\n[ME]: ")
+              (setq pos (point)))
+            (set-marker end-marker (point)))
+          (when org-ai-jump-to-end-of-block
+            (goto-char pos))
+          ;; final
+          (org-element-cache-reset)
+          (undo-boundary)))))
 
 
 ;; Here is an example for how a full sequence of OpenAI responses looks like:
@@ -972,30 +1046,28 @@ For not stream url return event and hook after-change-functions
   ;; (setq org-ai--debug-data nil)
   ;; (setq org-ai--debug-data-raw nil)
 
-  (org-ai--debug service (type-of service))
-  (org-ai--debug stream (type-of stream))
+  ;; (org-ai--debug service (type-of service))
+  ;; (org-ai--debug stream (type-of stream))
 
   ;; - HTTP body preparation as a string
-  (let* ((url-request-extra-headers (org-ai--get-headers service))
-         (url-request-method "POST")
-         (endpoint (org-ai--get-endpoint messages service))
-         (url-request-data (org-ai--payload :prompt prompt
-					    :messages messages
-					    :model model
-					    :max-tokens max-tokens
-					    :temperature temperature
-					    :top-p top-p
-					    :frequency-penalty frequency-penalty
-					    :presence-penalty presence-penalty
-					    :service service
-					    :stream stream)))
+  (let ((url-request-extra-headers (org-ai--get-headers service))
+        (url-request-method "POST")
+        (endpoint (org-ai--get-endpoint messages service))
+        (url-request-data (org-ai--payload :prompt prompt
+					   :messages messages
+					   :model model
+					   :max-tokens max-tokens
+					   :temperature temperature
+					   :top-p top-p
+					   :frequency-penalty frequency-penalty
+					   :presence-penalty presence-penalty
+					   :service service
+					   :stream stream)))
     ;; - regex check
     (org-ai--check-model model endpoint) ; not empty and if "api.openai.com" or "openai.azure.com"
 
-    (org-ai--debug "endpoint:" endpoint (type-of endpoint)
-                   "request-data:" (org-ai--prettify-json-string url-request-data)
-                   ;; "callback:" callback
-                   )
+    (org-ai--debug "org-ai-api-request endpoint:" endpoint (type-of endpoint)
+                   "request-data:" (org-ai--prettify-json-string url-request-data))
 
     (org-ai--debug "Main request before, that return a \"urllib buffer\".")
     (let ((url-request-buffer
@@ -1008,7 +1080,7 @@ For not stream url return event and hook after-change-functions
 
               (org-ai--debug-urllib (current-buffer))
 
-              ;; Called for not stream and should be handled as read
+              ;; Called for not stream, call `org-ai--current-url-request-callback'
               (org-ai--url-request-on-change-function nil nil nil)
 
               (org-ai--maybe-show-openai-request-error) ; TODO: change to RESULT by global customizable option
@@ -1018,10 +1090,6 @@ For not stream url return event and hook after-change-functions
               ))))
 
       (org-ai--debug "Main request after." url-request-buffer)
-
-      ;; - run timer that show /-\ looping, notification of status
-      ;; (when (not stream)
-
 
       (with-current-buffer url-request-buffer ; old org-ai--last-url-request-buffer
         ; just in case, also reset in `org-ai-reset-stream-state'
@@ -1044,9 +1112,155 @@ For not stream url return event and hook after-change-functions
       url-request-buffer)))
 
 
+
+(cl-defun org-ai-api-request-llm (service model callback &optional &key prompt messages max-tokens temperature top-p frequency-penalty presence-penalty)
+  "Simplified version of `org-ai-api-request' without stream support.
+Used for building agents or chain of requests.
+Call callback with nil or result of `org-ai--normalize-response' of response."
+  (let ((url-request-extra-headers (org-ai--get-headers service))
+        (url-request-method "POST")
+        (endpoint (org-ai--get-endpoint messages service))
+        (url-request-data (org-ai--payload :prompt prompt
+					   :messages messages
+					   :model model
+					   :max-tokens max-tokens
+					   :temperature temperature
+					   :top-p top-p
+					   :frequency-penalty frequency-penalty
+					   :presence-penalty presence-penalty
+					   :service service
+					   :stream nil)))
+    (org-ai--debug "org-ai-api-request-llm prompt: %s" prompt)
+    (org-ai--debug "org-ai-api-request-llm messages: %s" messages)
+    (org-ai--debug "org-ai-api-request-llm endpoint: %s %s" endpoint (type-of endpoint))
+    (org-ai--debug "org-ai-api-request-llm request-data:" (org-ai--prettify-json-string url-request-data))
+
+
+
+    (let* ((url-request-buffer
+           (url-retrieve ; <- - - - - - - - -  MAIN
+            endpoint
+            (lambda (_events)
+              (org-ai--debug-urllib (current-buffer))
+              (unless (org-ai--maybe-show-openai-request-error) ; TODO: change to RESULT by global customizable option
+                ;; - read from url-buffer
+                (when (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)
+                  (goto-char url-http-end-of-headers)
+                  (let ((json-object-type 'plist)
+                        (json-key-type 'symbol)
+                        (json-array-type 'vector))
+                    (condition-case _err
+                        ;;   (print (list "HERE5" (current-buffer) (point) (point-max)))
+                        ;;   ;; ;; (#s(org-ai--response role "assistant") #s(org-ai--response text "It seems ") #s(org-ai--response stop "length"))
+
+                        (let* ((res1 (buffer-substring-no-properties (point) (point-max)))
+                              (res2 (json-read-from-string res1))
+                              (res3 (org-ai--normalize-response res2))
+                              (res4 (nth 1 res3))
+                              (res5 (org-ai--response-payload res4))
+                              (res (decode-coding-string res5 'utf-8))
+                              )
+                          (print (list "HERE6" res3 ))
+                          (print (list "HERE6h7" callback))
+                          ;; to prevent catching error to here
+                          (run-at-time 0 nil callback res)
+                          )
+                        ;; (funcall callback (decode-coding-string (org-ai--response-payload (nth 1
+                        ;;                                                                        (org-ai--normalize-response
+                        ;;                                                                         (json-read-from-string
+                        ;;                                                                          (buffer-substring-no-properties (point) (point-max))))))
+                        ;;                                         'utf-8))
+                      (error
+                       (message "HERE7 error"))
+                       ;; (funcall callback nil)
+                       )))))))
+           ;; (timeout (or timeout org-ai-timers-duration))
+           ;; (waiter (run-with-timer 3 0 (lambda(b) (print b)) b))
+          )
+      url-request-buffer)))
+
+;; - Test!
+;; (let ((service 'together)
+;;       (model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free")
+;;       (max-tokens 10)
+;;       (temperature nil)
+;;       (top-p nil)
+;;       (frequency-penalty nil)
+;;       (presence-penalty nil))
+;;   (org-ai-timers--progress-reporter-run
+;;    1
+;;    (lambda (buf) (org-ai-timers--interrupt-current-request buf #'org-ai-openai--interrupt-url-request))
+;;    (org-ai-api-request-llm service model (lambda (result)
+;;                                            (org-ai-timers--interrupt-current-request (current-buffer) #'org-ai-openai--stop-tracking-url-request)
+;;                                            (print (list "hay" result)))
+;;                            :timeout 20
+;;                            :messages  (vector (list :role 'system :content "You a helpful.")
+;;                                               (list :role 'user :content "How to do staff?"))
+;;                            :max-tokens max-tokens
+;;                            :temperature temperature
+;;                            :top-p top-p
+;;                            :frequency-penalty frequency-penalty
+;;                            :presence-penalty presence-penalty)))
+
+(defvar org-ai-api-request-llm-retries-local-url-buffer  nil)
+(make-variable-buffer-local 'org-ai-api-request-llm-retries-local-url-buffer)
+
+(cl-defun org-ai-api-request-llm-retries (service model timeout callback &optional &key retries prompt messages header-marker max-tokens temperature top-p frequency-penalty presence-penalty)
+  "Add TIMEOUT and RETRIES parameters to `org-ai-api-request-llm' functiion.
+Timer function accept left attempts count.
+Timer function restart requst and restart timer with attempts-1.
+In callback we add cancel timer function."
+  (org-ai--debug "org-ai-api-request-llm-retries1 timeout %s" timeout)
+  (let ((cb (current-buffer)))
+    (with-temp-buffer ; to separate variable `org-ai-api-request-llm-retries-local-url-buffer'
+      (org-ai--debug "org-ai-api-request-llm-retries12")
+      (let* ((left-retries (if retries (1- retries)
+                             ;; else
+                             3))
+             (timer (run-with-timer timeout
+                                    0
+                                    (lambda ()
+                                      (org-ai--debug "in org-ai-api-request-llm-retries timer %s" left-retries)
+                                      ;; - kill old
+                                      (when (buffer-live-p org-ai-api-request-llm-retries-local-url-buffer)
+                                        (org-ai-timers--interrupt-current-request org-ai-api-request-llm-retries-local-url-buffer #'org-ai-openai--interrupt-url-request))
+                                      ;; - restart
+                                      (if (> left-retries 0)
+                                          (org-ai-api-request-llm-retries service model timeout callback
+                                                                          left-retries prompt messages header-marker max-tokens temperature top-p frequency-penalty presence-penalty))
+                                      ))))
+        (org-ai--debug "org-ai-api-request-llm-retries2")
+        (setq org-ai-api-request-llm-retries-local-url-buffer
+              (org-ai-api-request-llm service model
+                                      (lambda (result-llm-retries)
+                                        (org-ai--debug "org-ai-api-request-llm callback1, timer, result:" timer result-llm-retries)
+                                        (if timer
+                                            (cancel-timer timer))
+                                        (org-ai--debug "org-ai-api-request-llm  callback2")
+                                        ;; (with-current-buffer cb
+                                        (org-ai--debug "org-ai-api-request-llm  callback3 %s %s" callback result-llm-retries)
+                                        (run-at-time 0 nil callback result-llm-retries)
+                                        ;; (funcall callback result-llm-retries)
+                                        (org-ai--debug "org-ai-api-request-llm  callback4")
+                                        ;; )
+                                      )
+                                      :prompt prompt
+                                      :messages  messages
+                                      :max-tokens max-tokens
+                                      :temperature temperature
+                                      :top-p top-p
+                                      :frequency-penalty frequency-penalty
+                                      :presence-penalty presence-penalty))
+        ;; save url-buffer
+        (org-ai-timers--set org-ai-api-request-llm-retries-local-url-buffer
+                            header-marker)
+        (org-ai--debug "org-ai-api-request-llm-retries3" org-ai-timers--element-marker-variable-dict org-ai-api-request-llm-retries-local-url-buffer)
+        ))))
+
 (defun org-ai--maybe-show-openai-request-error ()
   "If the API request returned an error, show it.
-`REQUEST-BUFFER' is the buffer containing the request."
+`REQUEST-BUFFER' is the buffer containing the request.
+Return t if error happen, otherwise nil"
   (when (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)
     (goto-char url-http-end-of-headers))
   (condition-case nil
@@ -1266,7 +1480,7 @@ Called within url-retrieve buffer."
 ;; reporter.
 ;; Functions:
 ;; Failure by time:
-;; `org-ai-openai--interrupt-all-url-requests' 'failed
+;; `org-ai-openai-stop-all-url-requests' 'failed
 ;; `org-ai-timers--interrupt-current-request'
 ;; Success:
 ;; `org-ai-timers--interrupt-current-request'
@@ -1282,26 +1496,27 @@ Called within url-retrieve buffer."
 (defun org-ai-openai--interrupt-url-request (url-buffer)
   "Remove on-update hook and kill buffer.
 Called from `org-ai-openai-stop-url-request',
-`org-ai-openai--interrupt-all-url-requests'."
+`org-ai-openai-stop-all-url-requests'."
   (org-ai--debug "org-ai-openai--interrupt-url-request"
                  (eq (current-buffer) url-buffer)
                  (buffer-live-p url-buffer))
   (if (eq (current-buffer) url-buffer)
       (progn
         (remove-hook 'after-change-functions #'org-ai--url-request-on-change-function t)
-        (when (and url-buffer (buffer-live-p url-buffer))
-          (kill-buffer url-buffer)))
+        (when (buffer-live-p url-buffer)
+          (let (kill-buffer-query-functions)
+            (kill-buffer url-buffer))))
     ;; else
     (when (and url-buffer (buffer-live-p url-buffer))
       (with-current-buffer url-buffer
-        (remove-hook 'after-change-functions #'org-ai--url-request-on-change-function t))
-      (let (kill-buffer-query-functions) ; set to nil
-        (kill-buffer url-buffer)))))
+        (remove-hook 'after-change-functions #'org-ai--url-request-on-change-function t)
+        (let (kill-buffer-query-functions) ; set to nil
+          (kill-buffer url-buffer))))))
 
 (defun org-ai-openai--stop-tracking-url-request (url-buffer)
   "Remove on-update hook and not kill buffer.
   Called from `org-ai-openai-stop-url-request',
-`org-ai-openai--interrupt-all-url-requests'."
+`org-ai-openai-stop-all-url-requests'."
   (org-ai--debug "org-ai-openai--stop-tracking-url-request"
                  (eq (current-buffer) url-buffer)
                  (buffer-live-p url-buffer))
@@ -1316,21 +1531,40 @@ Called from `org-ai-openai-stop-url-request',
   "Interrupt the request for ELEMENT or URL-BUFFER.
 If  no ELEMENT  or URL-BUFFER  provided we  use in  current ai  block at
 current position at current buffer.
+Return t if buffer was found.
 Called from `org-ai-timers--progress-reporter-run'."
   (interactive)
-  (org-ai--debug "org-ai-openai-stop-url-request buf, alive?:"
-                 (current-buffer)
-                 (buffer-live-p (current-buffer)))
-  (let* ((element (or element (org-ai-block-p)))
-         (url-buffer (or url-buffer (org-ai-timers--get-variable (org-ai-block-get-header-marker element)))))
-    (if (and element url-buffer)
+  (org-ai--debug "org-ai-openai-stop-url-request, current buffer %s, url-buf %s, element %s"
+                 (current-buffer) url-buffer
+                 (org-ai-block-p))
+  (if-let* ((element (or element (org-ai-block-p)))
+            (url-buffers (if url-buffer
+                            (list url-buffer)
+                          ;; else
+                          (org-ai-timers--get-keys-for-variable (org-ai-block-get-header-marker element)))))
         (progn
-          (org-ai-timers--interrupt-current-request url-buffer #'org-ai-openai--interrupt-url-request failed)
+          (org-ai--debug "org-ai-openai-stop-url-request, element %s, url-buffers %s"
+                         element
+                         url-buffers)
+          (org-ai-timers--interrupt-current-request url-buffers #'org-ai-openai--interrupt-url-request failed)
           t)
         ;; ;; else - called not at from some block, but from elsewhere
-        ;; (org-ai-openai--interrupt-all-url-requests #'org-ai-openai--interrupt-url-request) ; kill all
+        (org-ai--debug "org-ai-openai-stop-url-request all %s" (org-ai-timers--get-keys-for-variable (org-ai-block-get-header-marker element)))
+        (org-ai-openai-stop-all-url-requests) ; kill all
       ;; else
-      nil)))
+      ))
+
+;;;###autoload
+(cl-defun org-ai-openai-stop-all-url-requests (&optional &key failed)
+  "Return t if buffer was found."
+  (interactive)
+  (let ((buffers (org-ai-timers--get-all-keys)))
+    (org-ai--debug "org-ai-openai-stop-all-url-request" buffers)
+    (when buffers
+      (setq org-ai-timers--element-marker-variable-dict nil)
+      (org-ai-timers--interrupt-current-request buffers #'org-ai-openai--interrupt-url-request failed)
+      t)))
+
 
 
 ;;; - Others
@@ -1370,13 +1604,14 @@ prompt found in `CONTENT-STRING'."
            (parts (if (and
                        (not (string-prefix-p "[SYS]:" (car parts)))
                        (not (string-prefix-p "[ME]:" (car parts)))
+                       (not (string-prefix-p "[ME:" (car parts)))
                        (not (string-prefix-p "[AI]:" (car parts)))
                        (not (string-prefix-p "[AI_REASON]:" (car parts))))
                       (progn (setf (car parts) (concat "[ME]: " (car parts)))
                              parts)
                     parts))
 
-           ;; create (:role :content) list
+           ;; split part and create (list :role 'role :content string)
            (messages (cl-loop for part in parts
                               ;; Filter out reasoning parts as including them will cause 404
                               ;; https://api-docs.deepseek.com/guides/reasoning_model#multi-round-conversation
@@ -1468,6 +1703,11 @@ prompt found in `CONTENT-STRING'."
 
 (cl-assert
  (equal
+  (let ((test-string "[ME:] hello world")) (org-ai-openai--collect-chat-messages test-string))
+  '[(:role user :content "hello world")]))
+
+(cl-assert
+ (equal
   (let ((test-string "[ME]: hello [ME:] world")) (org-ai-openai--collect-chat-messages test-string))
   '[(:role user :content "hello\nworld")]))
 
@@ -1527,10 +1767,30 @@ inside the assembled prompt string."
   "You: user\n\nAssistant: assistant"))
 
 
-(org-ai--normalize-response '(id "o3fA4D4-62bZhn-9617f44f6d399d91" object "chat.completion" created 1752904364 model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free" prompt [] choices [(finish_reason "stop" seed 819567834314233700 logprobs nil index 0 message (role "assistant" content "It works: `(2 3 1)` is returned." tool_calls []))] usage (prompt_tokens 131 completion_tokens 14 total_tokens 145 cached_tokens 0)))
+(cl-assert
+ (equal
+  (let ((test-val '(id "o3fA4D4-62bZhn-9617f44f6d399d91" object "chat.completion" created 1752904364 model "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free" prompt [] choices [(finish_reason "stop" seed 819567834314233700 logprobs nil index 0 message (role "assistant" content "It works: `(2 3 1)` is returned." tool_calls []))] usage (prompt_tokens 131 completion_tokens 14 total_tokens 145 cached_tokens 0))
+                  ))
+    (org-ai--normalize-response test-val))
+  '(#s(org-ai--response role "assistant") #s(org-ai--response text "It works: `(2 3 1)` is returned.") #s(org-ai--response stop "stop"))))
+
+
+(let* ((test-val '(#s(org-ai--response role "assistant") #s(org-ai--response text "It seems ") #s(org-ai--response stop "length")))
+       (test-val0 (nth 0 test-val))
+       (test-val1 (nth 1 test-val))
+       )
+  (and
+   (equal (length test-val) 3)
+   (equal (org-ai--response-type test-val0) 'role)
+   (string-equal (decode-coding-string (org-ai--response-payload test-val0) 'utf-8) "assistant")
+   (equal (org-ai--response-type test-val1) 'text)
+   (string-equal (decode-coding-string (org-ai--response-payload test-val1) 'utf-8) "It seems ")
+  ))
+
+
 
 (defun org-ai-switch-chat-model ()
-  "Change `org-ai-default-chat-model'."
+  "Change `org-ai-creds-chat-model'."
   (interactive)
   (let ((model (completing-read "Model: "
                                 (append org-ai-chat-models
@@ -1538,7 +1798,7 @@ inside the assembled prompt string."
                                           "gemini-2.5-pro-preview-03-25" "gemini-2.5-flash-preview-04-17" "gemini-2.0-flash" "gemini-2.0-pro-exp"
                                           "deepseek-chat" "deepseek-reasoner"))
                                 nil t)))
-    (setq org-ai-default-chat-model model)))
+    (setq org-ai-creds-chat-model model)))
 
 
 (provide 'org-ai-openai)

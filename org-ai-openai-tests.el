@@ -1,5 +1,7 @@
 (require 'org-ai-openai)
 
+;; (eval-buffer)
+;;
 (defun test-org-ai--strip-api-url ()
   "Runs tests for `org-ai--strip-api-url` explicitly for each case,
    without using a loop or an explicit assert function."
