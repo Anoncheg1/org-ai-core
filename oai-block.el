@@ -320,6 +320,7 @@ TODO: EXEC-TIME."
 
 (defun oai-block-where-is-result (&optional insert _info hash)
   "Modified `org-babel-where-is-src-block-result' function."
+  (oai--debug "oai-block-where-is-result")
   (let ((context (oai-block-p)))
     (catch :found
       (org-with-wide-buffer
@@ -373,8 +374,7 @@ TODO: EXEC-TIME."
           (insert "\n")
           (org-babel--insert-results-keyword
            (org-element-property :name context) hash)
-          (point)))))
-)
+          (point))))))
 
 (defun oai-block-remove-result (&optional info keep-keyword)
   "Remove the result of the current source block.

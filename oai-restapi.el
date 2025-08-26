@@ -36,6 +36,7 @@
 ;; - TODO: rename all functions to convention
 ;; - TODO: rename file to -api.el
 ;; - TODO: escame #+end_ai after insert of text in block
+;; - TODO: add support for several backends, curl, request.el
 
 
 ;;; Commentary:
@@ -1273,7 +1274,11 @@ Return t if error happen, otherwise nil"
                               (string-trim (buffer-substring-no-properties url-http-end-of-headers
                                                                            (point-max))))
                        ;; else
-                       "")))
+                       ""))
+        (http-header-first-line (buffer-substring-no-properties (point-min)
+                                                                (save-excursion
+                                                                  (goto-char (point-min))
+                                                                  (line-end-position)))))
     (oai--debug "oai-restapi--maybe-show-openai-request-error2 %s %s" http-code http-data)
     (or
      (condition-case nil
@@ -1286,15 +1291,15 @@ Return t if error happen, otherwise nil"
                                   message
                                 (json-encode err))))
            (if oai-restapi-show-error-in-result
-               (progn
-                 (oai-block-insert-result (concat "Error from the service API:\n\n" message)))
+                 (oai-restapi-insert-result-error (concat (format "%s\n" http-header-first-line)
+                                                          "Error from the service API:\n\t" message) (current-buffer))
              ;; else
              (oai-restapi--show-error message))
            )
        (error nil))
      (when (and http-code (/= http-code 200))
        (if oai-restapi-show-error-in-result
-           (oai-restapi-insert-result-error (format "HTTP Error from the service: %s %s" http-code http-data) (current-buffer))
+           (oai-restapi-insert-result-error (format "HTTP Error from the service: %s %s \n %s" http-code http-data http-header-first-line) (current-buffer))
            ;; (oai-block-insert-result (format "HTTP Error code from the service API: %s" http-code))
            (oai-restapi--show-error (number-to-string http-code))
          )))))

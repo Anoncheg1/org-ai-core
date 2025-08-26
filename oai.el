@@ -226,6 +226,20 @@ It's designed to \"do the right thing\":
 ;;   "Remove the advice that cancels current request when `keyboard-quit' is called."
 ;;   (advice-remove 'keyboard-quit #'oai-keyboard-quit)) ; here
 
+;;; -=-= M-x oai-toggle-debug
+;;;###autoload
+(defun oai-toggle-debug (&optional element)
+  "Enable/disable debug."
+  (interactive)
+  (if oai-debug-buffer
+      (progn
+        (setq oai-debug-buffer nil)
+        (message "Disable oai debugging"))
+
+    ;; else
+    (setq oai-debug-buffer   "*debug-oai*")
+    (message "Enable oai debugging")))
+
 ;;; -=-= Minor mode
 
 (defvar oai-mode-map (make-sparse-keymap)

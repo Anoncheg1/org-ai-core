@@ -235,6 +235,26 @@ and INFO-ALIST is the parameters from its header."
 ;;     ))
 
 
+;;; Test cases - tags
+(ert-deftest oai-block-tags-replace-test ()
+    (let* ((temp-file (make-temp-file "mytest"))
+           (res
+            (unwind-protect
+                (progn
+                  (with-temp-file temp-file
+                    (insert "Hello, world test!"))
+                  (print temp-file)
+
+                  (prog1 (oai-block-tags-replace (format "aas `@%s`bb." temp-file))
+                    ;; (should (string= (oai-block-tags-replace temp-file) "Expected result")))
+                    (delete-file temp-file)))))
+           (res (split-string res "\n")))
+      (should (string-equal "aas " (nth 0 res)))
+      (should (string-equal "```" (nth 2 res)))
+      (should (string-equal "Hello, world test!" (nth 3 res)))
+      (should (string-equal "```" (nth 4 res)))
+      (should (string-equal "bb." (nth 5 res)))))
+
 ;; To run these tests:
 ;; 1. Save the code to an .el file (e.g., `oai-params-test.el`).
 ;; 2. Open Emacs and load the file: `M-x load-file RET oai-tests2.el RET`.

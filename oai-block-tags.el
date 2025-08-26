@@ -24,13 +24,13 @@
 
 (defvar oai-block-tags--regexes '(
                                ;; :backtrace "@Backtrace`?\\([^a-zA-Z]\\|$\\)"
-                               :backtrace "\\(`?@Backtrace`?\\)\\([^a-zA-Z]\\|$\\)"
-                               :path "@\\(\\.\\.?/\\|\\.\\.?\\\\\\|\\.\\.?\\|/\\|\\\\\\|[A-Za-z]:\\\\\\)[a-zA-Z0-9_./\\\\-]*"
+                               :backtrace "\\(`?@Backtrace`?\\)\\([^a-zA-Z\"']\\|$\\)"
+                               :path "`?@\\(\\.\\.?/\\|\\.\\.?\\\\\\|\\.\\.?\\|/\\|\\\\\\|[A-Za-z]:\\\\\\)[a-zA-Z0-9_./\\\\-]*`?"
                                           ))
 
-(defvar oai-block-tags--markdown-prefixes '(:backtrace "```elisp-backtrace\n"
-                                         :path-directory "```ls-output\n"
-                                         :path-file  "```\n"))
+(defvar oai-block-tags--markdown-prefixes '(:backtrace "```elisp-backtrace"
+                                         :path-directory "```ls-output"
+                                         :path-file  "```"))
 
 (defvar oai-block-tags--backtrace-max-lines 12)
 
@@ -66,7 +66,11 @@
                    "@."
                    "@/"))
          '("@/file-s_s" "@/file.t_xt" "@./file.txt" "@/some/path/file.txt" "@C:\\some\\file.txt" "@L:\\folder\\file.txt" "@\\network\\share" "@.\\windowsfile" "@/file/" "@/file.txt/" "@./file.txt/" "@/some/path/file.txt/" "@C:\\some\\file.txt\\" "@L:\\folder\\file.txt\\" "@\\network\\share\\" "@.\\windowsfile\\" nil nil nil nil nil "@../right" "@../right/" "@.." "@." "@/"))))
-
+(cl-assert
+ (string-equal
+  (oai-block-tags--replace-last-regex-smart "asd `@/tmp/t.txt` assd" (plist-get oai-block-tags--regexes :path) "path")
+  "asd path assd"))
+ ;; (oai-block-tags--replace-last-regex-smart "asd `[[/tmp][sd]]` assd" (plist-get oai-block-tags--regexes :path) "path")
 ;;; -=-= Backtrace
 
 (defun oai-block-tags--take-n-lines (string n)
@@ -115,20 +119,44 @@ If N exceeds the number of lines, return all lines. If N <= 0, return an empty s
     (error "File does not exist or not readable: %s" path-string)
     nil))
 
+(defun oai-block-tags--filepath-to-language (path-string)
+  "For path-string return Org babel source block language name."
+  (let* ((mode-symbol (assoc-default path-string auto-mode-alist 'string-match))
+        (mode-string (apply #'mapconcat #'identity (butlast (string-split (symbol-name mode-symbol) "-")) '("-"))))
+    (car (rassq (intern mode-string) org-src-lang-modes))))
+
+(cl-assert
+ (string-equal (oai-block-tags--filepath-to-language "/tmp/a.el") "elisp"))
+
 (defun oai-block-tags--compose-block-for-path (path-string content)
   "Return file/directory content in mardown block without last ```."
   (concat
-   "\nHere " (file-name-nondirectory (directory-file-name path-string)) ":\n"
+   "\nHere " (file-name-nondirectory (directory-file-name path-string)) (if (file-directory-p path-string) " folder" "") ":\n"
    ;; prefix
    (if (file-directory-p path-string)
        (plist-get oai-block-tags--markdown-prefixes :path-directory)
-     ;; else
-     (plist-get oai-block-tags--markdown-prefixes :path-file))
-   content))
+     ;; else - not derectory
+     (let* ((mode (assoc-default path-string auto-mode-alist 'string-match))
+            (mode (if mode
+                      (car (rassq (intern "sh") org-src-lang-modes))
+                      (apply #'mapconcat #'identity (butlast (string-split (symbol-name mode) "-")) '("-")) ;; emacs-elisp from emacs-elisp
+                    ;; else
+                    "")))
+     (concat (plist-get oai-block-tags--markdown-prefixes :path-file) mode)))
+   "\n"
+   content
+   "\n```\n"))
+
+
+(cl-assert
+ (string-equal (oai-block-tags--compose-block-for-path "a.el" "ss")
+"\nHere a.el:
+```emacs-lisp
+ss
+```\n"))
 
 ;;; -=-= Replace
-
-(defun oai-block-tags--replace-last-regex-smart (string regexp &optional replacement)
+(defun oai-block-tags--replace-last-regex-smart (string regexp &optional replacement subexp)
   "Replace the last match of REGEXP in STRING with REPLACEMENT,
 preserving any extra captured groups.
 If REPLACEMENT not provided return found string for regexp."
@@ -137,31 +165,52 @@ If REPLACEMENT not provided return found string for regexp."
         (last-end nil)
         (last-group ""))
     (while (and pos
-                 (string-match regexp string pos))
+                (string-match regexp string pos))
       (setq pos (match-beginning 0))
-      (setq last-pos pos)
-      ;; (print (list "aa" (match-string 0 string) (match-string 1 string)))
-      (setq last-end (match-end 0))
-      (setq last-group (match-string 2 string))
-      (setq pos (1+ pos)))
+      (setq last-pos pos) ; beg
+
+      (setq last-end (match-end 0)) ; end
+      ;; (print (list "last-group"   (match-string 0 string) (match-string 1 string) (match-string 2 string)))
+      (setq pos last-end) ; move forward
+      )
     (if last-pos
         (if replacement
-            (concat (substring string 0 last-pos)
-                    replacement
-                    last-group
-                    (substring string last-end))
-          ;; else
-          (substring string last-pos last-end)) ; what was found
+            ;; (replace-match replacement 'fixedcase 'literal string)
+            ;; (if (eq (aref string (1- last-end)) ?\s) ;; if space after match
+                ;; (replace-match replacement 'fixedcase 'literal string 1)
+              ;; else
+              (concat (substring string 0 last-pos)
+                      replacement
+                      ;; last-group
+                      (substring string last-end))
+          ;; else - just return 0 group
+          ;; remove leading and ending (` and space) characters
+           (replace-regexp-in-string "^[` ]*" ""
+                                     (replace-regexp-in-string "[` ]*\$" ""
+                                                               (match-string 0 string))) ;; (substring string last-pos last-end)
+          ) ; what was found
       string)))
 
 (cl-assert
- (equal (oai-block-tags--replace-last-regex-smart "asdasd@Backtraceasdasdasd" "@Backtrace" "111")
+ (equal (oai-block-tags--replace-last-regex-smart "asdasd@Backtraceasdasdasd" "\\(@Backtrace\\)" "111")
         "asdasd111asdasdasd"))
 
 (cl-assert
  (equal (oai-block-tags--replace-last-regex-smart "asdasd@Backtraceasdasdasd" "@Backtrace")
         "@Backtrace"))
 
+;; search without replace
+(cl-assert
+ (and
+  (equal (let ((regex (plist-get oai-block-tags--regexes :backtrace)))
+           (oai-block-tags--replace-last-regex-smart
+            "foo `@Backtrace` bar `@Backtrace `@BacktraceX"
+            regex)) "@Backtrace")
+
+  (equal (let ((regex (plist-get oai-block-tags--regexes :backtrace)))
+           (oai-block-tags--replace-last-regex-smart
+            "foo `@Backtrace` bar `@Backtrace `@Backtrace`X"
+            regex)) "@Backtrace")))
 
 (cl-assert
  (equal (let ((regex (plist-get oai-block-tags--regexes :backtrace)))
@@ -169,14 +218,23 @@ If REPLACEMENT not provided return found string for regexp."
            "foo `@Backtrace` bar `@Backtrace `@Backtrace`X"
            regex
            "REPLACED"))
-        "foo `@Backtrace` bar `@Backtrace `REPLACED`X"))
+        "foo `@Backtrace` bar `@Backtrace REPLACEDX"))
+;; with space
 (cl-assert
  (equal (let ((regex (plist-get oai-block-tags--regexes :backtrace)))
           (oai-block-tags--replace-last-regex-smart
            "foo `@Backtrace` bar `@Backtrace `@BacktraceX"
            regex
            "REPLACED"))
-        "foo `@Backtrace` bar `REPLACED `@BacktraceX"))
+        "foo `@Backtrace` bar REPLACED`@BacktraceX"))
+
+(cl-assert
+ (equal (let ((regex (plist-get oai-block-tags--regexes :path)))
+          (oai-block-tags--replace-last-regex-smart
+           "foo `@/asd.txt` X"
+           regex
+           "REPLACED"))
+        "foo `@Backtrace` bar REPLACED`@BacktraceX"))
 
 (cl-assert
  (equal (let ((regex (plist-get oai-block-tags--regexes :backtrace)))
@@ -186,13 +244,13 @@ If REPLACEMENT not provided return found string for regexp."
 
 (defun oai-block-tags-replace (string)
   "Replace links in STRING with their targets.
-And return modified string or the same string.
-TODO: fix when @Backtrace or @path surounded by (`) character."
+And return modified string or the same string."
   (let ((backtrace-re (plist-get oai-block-tags--regexes :backtrace))
-        (path-re (plist-get oai-block-tags--regexes :path))
-        (markdown-postfix "\n```\n"))
+        (path-re (plist-get oai-block-tags--regexes :path)))
     ;;return
-    (cond ((string-match backtrace-re string) ; "@Backtrace" substring exist
+    (cond
+     ;; "@Backtrace" substring exist
+     ((string-match backtrace-re string)
            (if-let* ((bt (oai-block-tags--get-backtrace-buffer-string)) ; *Backtrace* buffer exist
                      (bt (oai-block-tags--take-n-lines bt oai-block-tags--backtrace-max-lines))
                      (bt (concat "\n" (plist-get oai-block-tags--markdown-prefixes :backtrace)
@@ -208,24 +266,43 @@ TODO: fix when @Backtrace or @path surounded by (`) character."
              ;;   ;; else
              ;;   new-string)
              ))
-        ((string-match path-re string)
-         (if-let* ((path-string (oai-block-tags--replace-last-regex-smart string path-re))
-                   (content (if (file-directory-p path-string)
-                                (oai-block-tags--get-directory-content path-string)
-                              ;; else
-                              (oai-block-tags--read-file-to-string-safe
-                               ;; remove first @ character from link
-                               (if (> (length path-string) 0)
-                                   (substring path-string 1)
-                                 ""))))
-                   (content (oai-block-tags--compose-block-for-path path-string content))
-
-                   (new-string (oai-block-tags--replace-last-regex-smart string path-re
-                                                         (concat content markdown-postfix))))
+             ;; path @/path/file.txt
+          ((string-match path-re string)
+           (print "test")
+           (if-let* ((path-string (oai-block-tags--replace-last-regex-smart string path-re))
+                     ;; remove first @ character from link
+                     (path-string (if (> (length path-string) 0)
+                                      (substring path-string 1)
+                                    ""))
+                     (content (if (file-directory-p path-string)
+                                  (oai-block-tags--get-directory-content path-string)
+                                ;; else
+                                (oai-block-tags--read-file-to-string-safe
+                                 path-string)
+                                ))
+                     (content (oai-block-tags--compose-block-for-path path-string content))
+                     (new-string (oai-block-tags--replace-last-regex-smart string
+                                                                           path-re
+                                                                           content)))
                new-string
              ;; else
              string))
-        (t string))))
+          (t string))))
+
+ (oai-block-tags-replace  "ss[[sas]]ss")
+;; (cl-assert
+;;  (string-equal (let ((path "/tmp/tttt1"))
+;;                 (if (not (file-exists-p path))
+;;                     (make-directory path))
+;;                 (oai-block-tags-replace (concat "ssvv `@" path "` bbb")))
+;; "ssvv
+;; Here tttt1 folder:
+;; ```ls-output
+;;   /tmp/tttt1:
+
+;; ```
+;;  bbb")
+
 
 ;;; -=-= Fontify Backtrace & links
 
@@ -245,15 +322,23 @@ This is special fontify function, that return t when match found.
                 (save-match-data
                   ;; fontify Org links [[..]]
                   ;; (message beg)
+                  ;; - [[link][]]
                   (progn
                     (goto-char beg)
                     (while (re-search-forward org-link-any-re end t)
                       (goto-char (match-beginning 0))
                       (setq ret (org-activate-links end))
                       ))
+                  ;; - @Backtrace
                   (progn
                     (goto-char beg)
                     (while (re-search-forward (plist-get oai-block-tags--regexes :backtrace) limit t)
+                      (add-face-text-property (match-beginning 0) (match-end 0) 'org-link)
+                      (setq ret t)))
+                  ;; - @/tmp/
+                  (progn
+                    (goto-char beg)
+                    (while (re-search-forward (plist-get oai-block-tags--regexes :path) limit t)
                       (add-face-text-property (match-beginning 0) (match-end 0) 'org-link)
                       (setq ret t)))
                   ;; fontify markdown sub-blocks
