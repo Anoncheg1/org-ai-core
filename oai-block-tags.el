@@ -39,6 +39,7 @@
 (defvar oai-block-tags--markdown-prefixes '(:backtrace "```elisp-backtrace"
                                          :path-directory "```ls-output"
                                          :path-file  "```"))
+(defvar oai-block-tags--markdown-postfix "\n```\n")
 
 (defvar oai-block-tags--backtrace-max-lines 12
   "Max lines to get from Backtrace buffer from begining.
@@ -49,6 +50,10 @@ All lines are rarely required, first 4-8 are most imortant.")
 Otherwise ls command used.  Also `directory-files-and-attributes' may be
 used.")
 
+(defvar oai-block-tags-error-on-missing-link nil
+  "If non-nil signal error for not found link.
+Used to set `org-link-search-must-match-exact-headline' before
+`org-link-search' function call.")
 
 (cl-assert
   (equal (mapcar (lambda (s)
@@ -184,7 +189,7 @@ ss
                                             )))
 
 ;;; -=-= Org links find
-(defun path-references-current-buffer-p (path)
+(defun oai-block-tags--path-references-current-buffer-p (path)
   "Return non-nil if PATH references the file currently visited by this buffer.
 Handles symlinks, remote files (TRAMP), and buffers without files."
   (when buffer-file-name
@@ -193,7 +198,7 @@ Handles symlinks, remote files (TRAMP), and buffers without files."
             (input-file  (file-truename (expand-file-name path))))
         (string= buffer-file input-file)))))
 
-(defun get-org-content-block (element)
+(defun oai-block-tags--get-org-content-block (element)
   "Return markdown block for LLM for current element at current position.
 Move pointer to the end of block."
   (let ((beg (or (org-element-property :contents-begin element)
@@ -227,7 +232,7 @@ Move pointer to the end of block."
              "\n```\n")
             )))
 
-(defun get-org-content ()
+(defun oai-block-tags--get-org-content ()
   "Return markdown block for LLM for current element at current position.
 For Org buffer only.
 Supported: blocks and headers.
@@ -240,7 +245,7 @@ Move pointer to the end of block."
       (cond
        ;; - blocks type
        ((member type  blocks-types)
-        (get-org-content-block element))
+        (oai-block-tags--get-org-content-block element))
        ;; - headline type
        ((eq type 'headline)
         (let ((org-element-end (org-element-at-point))
@@ -259,7 +264,7 @@ Move pointer to the end of block."
                                        (forward-line)))
                                     ((member type  blocks-types)
                                      ;; (print "bb")
-                                     (prog1 (get-org-content-block el)
+                                     (prog1 (oai-block-tags--get-org-content-block el)
                                        ;; (condition-case nil
                                            (org-forward-element)
                                            ;; (org-next-item)
@@ -278,8 +283,8 @@ Move pointer to the end of block."
           res
           )))))
 
-(defun get-replacement-for-org-link (link-string)
-  "Return replacement for org-link  string.
+(defun oai-block-tags--get-replacement-for-org-link (link-string)
+  "Return replacement for org-link  string or nil.
 Supported:
 - file with name of block,
 - directory
@@ -300,56 +305,42 @@ Supported:
     ;; 2) extract path and type
     (let ((type (org-element-property :type link))
           (path (org-element-property :path link)))
-      (print (list "type?" type path))
+      ;; (print (list "type?" type path))
       (pcase type
         ("file" ; org-link-search
          (let* ((option (org-element-property :search-option link))) ;; nil if no ::, may be "" if after :: there is empty last part
-           (print (list "option" option))
-           (print (list "check" (path-references-current-buffer-p path)))
+           ;; (print (list "option" option))
+           ;; (print (list "check" (oai-block-tags--path-references-current-buffer-p path)))
 
            (if (and option
                     (not (string-empty-p option)))
                ;; case 1) path to current file with option
-               (if (path-references-current-buffer-p path)
-                   (get-replacement-for-org-link (concat "[[" option "]]")) ; recursive call
+               (if (oai-block-tags--path-references-current-buffer-p path)
+                   (oai-block-tags--get-replacement-for-org-link (concat "[[" option "]]")) ; recursive call
                  ;; - else  case 2) path to other file with option
                  "") ;; TODO
              ;; else - no ::, only path
              (oai-block-tags--compose-block-for-path-full path))
            ))
-        ;;         (path-extended (if option (concat path "::" option) path)))
-        ;;    ;; check file
-        ;;    (if (and (not (file-directory-p path-string))
-        ;;             (not (and (file-exists-p path) (file-readable-p path))))
-        ;;        (user-error "File not readable or not exist %S" link-string))
-        ;;    ;; get
-        ;;    (if option
-        ;;        ;; subitem in file
-        ;;        (progn
 
-        ;;          )
-
-        ;;        ;; - else - no "::" - just file or directory
-        ;;        (if (file-directory-p path-string)
-        ;;                           (oai-block-tags--get-directory-content path-string)
-        ;;                         ;; else
-        ;;                         (oai-block-tags--compose-block-for-path-full path-string))
-        ;;        )))
         ;; ((or "coderef" "custom-id" "fuzzy" "radio")
         (or "radio" "fuzzy"
             (save-excursion
               (org-with-wide-buffer
                (if (equal type "radio")
 	           (org-link--search-radio-target path)
-	         (org-link-search
-	          (pcase type
-	            ("custom-id" (concat "#" path))
-	            ("coderef" (format "(%s)" path))
-	            (_ path))
-	          ;; Prevent fuzzy links from matching themselves.
-	          (and (equal type "fuzzy")
-	               (+ 2 (org-element-begin link)))))
-               (get-org-content)))
+                 ;; else - fuzzy, custom-di, coderef
+                 (let ((org-link-search-must-match-exact-headline oai-block-tags-error-on-missing-link))
+                   (org-link-search
+	            (pcase type
+	              ("custom-id" (concat "#" path))
+	              ("coderef" (format "(%s)" path))
+	              (_ path))
+	            ;; Prevent fuzzy links from matching themselves.
+	            (and (equal type "fuzzy")
+	                 (+ 2 (org-element-begin link)))))
+                 )
+               (oai-block-tags--get-org-content)))
          ;; (save-excursion
          ;;   (org-with-wide-buffer
 	 ;;    (if (equal type "radio")
@@ -367,7 +358,7 @@ Supported:
          ;;    ))
          )))))
 
-;; (get-replacement-for-org-link  "[[xx]]")
+;; (oai-block-tags--get-replacement-for-org-link  "[[xx]]")
 
 ;;; -=-= Replace
 ;; Supported:
@@ -480,42 +471,42 @@ And return modified string or the same string."
     (cond
      ;; - "@Backtrace" substring exist - replace the last one only
      ((string-match backtrace-re string)
-           (if-let* ((bt (oai-block-tags--get-backtrace-buffer-string)) ; *Backtrace* buffer exist
-                     (bt (oai-block-tags--take-n-lines bt oai-block-tags--backtrace-max-lines))
-                     (bt (concat "\n" (plist-get oai-block-tags--markdown-prefixes :backtrace)
-                                 bt
-                                 markdown-postfix)) ; prepare string
-                     (new-string (oai-block-tags--replace-last-regex-smart string backtrace-re bt))) ; insert backtrace
-               new-string
-             ;; else
-             string
-             ;; (if (and (equal (length string) (length new-string))
-             ;;          (string-equal string new-string))
-             ;;     (error "@Backtrace not found")
-             ;;   ;; else
-             ;;   new-string)
-             ))
-          ;; - Path @/path/file.txt - replace the last one only
-          ((string-match oai-block-tags--regexes-path string)
-           (if-let* ((path-string (oai-block-tags--replace-last-regex-smart string oai-block-tags--regexes-path))
-                     ;; remove first @ character from link
-                     (path-string (if (> (length path-string) 0)
-                                      (substring path-string 1)
-                                    ""))
-                     (replacement (oai-block-tags--compose-block-for-path-full path-string))
-                     (new-string (oai-block-tags--replace-last-regex-smart string
-                                                                           oai-block-tags--regexes-path
-                                                                           replacement)))
-               new-string
-             ;; else
-             string))
-          ;; - Org links [[link]]
+      (if-let* ((bt (oai-block-tags--get-backtrace-buffer-string)) ; *Backtrace* buffer exist
+                (bt (oai-block-tags--take-n-lines bt oai-block-tags--backtrace-max-lines))
+                (bt (concat "\n" (plist-get oai-block-tags--markdown-prefixes :backtrace) "\n"
+                            bt
+                            oai-block-tags--markdown-postfix)) ; prepare string
+                (new-string (oai-block-tags--replace-last-regex-smart string backtrace-re bt))) ; insert backtrace
+          new-string
+        ;; else
+        string
+        ;; (if (and (equal (length string) (length new-string))
+        ;;          (string-equal string new-string))
+        ;;     (error "@Backtrace not found")
+        ;;   ;; else
+        ;;   new-string)
+        ))
+     ;; - Path @/path/file.txt - replace the last one only
+     ((string-match oai-block-tags--regexes-path string)
+      (if-let* ((path-string (oai-block-tags--replace-last-regex-smart string oai-block-tags--regexes-path))
+                ;; remove first @ character from link
+                (path-string (if (> (length path-string) 0)
+                                 (substring path-string 1)
+                               ""))
+                (replacement (oai-block-tags--compose-block-for-path-full path-string))
+                (new-string (oai-block-tags--replace-last-regex-smart string
+                                                                      oai-block-tags--regexes-path
+                                                                      replacement)))
+          new-string
+        ;; else
+        string))
+     ;; - Org links [[link]]
 
-          ;; We search  for link regex,  when found we check  if there
-          ;; are double of  found substring after founded  one, if one
-          ;; more exist we skip the first  one that found. if no other
-          ;; exist we replace it.
-          ((string-match org-link-any-re string)
+     ;; We search  for link regex,  when found we check  if there
+     ;; are double of  found substring after founded  one, if one
+     ;; more exist we skip the first  one that found. if no other
+     ;; exist we replace it.
+     ((and (string-match org-link-any-re string)
            (let ((new-string string)
                  (replaced nil)
                  (pos-end 0)
@@ -527,32 +518,30 @@ And return modified string or the same string."
                (setq pos-end (match-end 0))
                (setq match (match-string 0 new-string))
                (print (list "aa" (regexp-quote match) new-string))
+               ;; check that there is no clone of this below, hence we replace the last one.
                (when (not (string-match (regexp-quote match) new-string pos-end))
-                 (setq replacement (get-replacement-for-org-link match))
-
-
-                       ;; (substring new-string pos-beg pos-en)
-                 (setq new-string (concat (substring new-string 0 pos-beg)
-                                          replacement
-                                          ;; last-group
-                                          (substring new-string pos-end)))
-                 (setq pos-end (+ pos-beg (length replacement)))
-                 (print (list pos-end new-string))
-                 (setq replaced t)
-                 ;; (oai-block-tags--replace-last-regex-smart)
-                 ))
+                 (setq replacement (oai-block-tags--get-replacement-for-org-link match))
+                 (print (list "replacement" replacement new-string))
+                 (when replacement
+                   (setq new-string (concat (substring new-string 0 pos-beg)
+                                            replacement
+                                            ;; last-group
+                                            (substring new-string pos-end)))
+                   (setq pos-end (+ pos-beg (length replacement)))
+                   (print (list pos-end new-string))
+                   (setq replaced t)
+                   ;; (oai-block-tags--replace-last-regex-smart)
+                   )))
              (if replaced
-                 new-string)
-             )
-           )
+                 new-string))))
 
 
-           ;; (if-let* ((path-string (oai-block-tags--replace-last-regex-smart string org-link-any-re)))
-           ;;     (progn
-           ;;       (print (list "link" path-string))
-           ;;       string))
-          ;; - default
-          (t string))))
+      ;; (if-let* ((path-string (oai-block-tags--replace-last-regex-smart string org-link-any-re)))
+      ;;     (progn
+      ;;       (print (list "link" path-string))
+      ;;       string))
+      ;; - default
+      (t string))))
 
 ;; (oai-block-tags-replace  "11[[sas]]222[[bbbaa]]3333[[sas]]4444")
 
@@ -587,8 +576,7 @@ And return modified string or the same string."
       ;; (print (oai-block-tags-replace (format "ssvv `@%s` bbb" file2))))
       (if (not (string-match (regexp-quote "```emacs-lisp") (print (oai-block-tags-replace (format "ssvv `@%s` bbb" file2)))))
           (error "ss2"))
-      (oai-block-tags-replace (format "ssvv [[%s]] bbb" file3))
-      )
+      (oai-block-tags-replace (format "ssvv [[%s]] bbb" file3)))
 
   ;; Return list of paths for later use
   ;; (list temp-dir file1 file2))

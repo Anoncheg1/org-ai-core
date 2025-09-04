@@ -38,11 +38,12 @@
 ;; It allows you to:
 ;; - Use #+begin_ai..#+end_ai blocks for org-mode
 ;; - Chat with a language model from within an org mode buffer.
-;; - Call requests from multiple block and buffers.
+;; - Call multiple requests from multiple block and buffers.
+;; - See how many in progress now.
 ;;
 ;; For the Internet connection used built-in libs: url.el and url-http.el.
 ;;
-;; See see https://github.com/Anoncheg1/oai-core for the full set
+;; See see https://github.com/Anoncheg1/oai for the full set
 ;; of features and setup instructions.
 ;;
 ;; Configuration:
@@ -50,6 +51,7 @@
 ;; (require 'oai)
 ;; (add-hook 'org-mode-hook #'oai-mode) ; oai.el
 ;; (setq oai-restapi-con-token "xxx") ; oai-restapi.el
+;; (setopt help-window-select t) ; for `oai-expand-block' function (optional)
 ;;
 ;; You will need an OpenAI API key.  It can be stored in the format
 ;;   machine api.openai.com login oai password <your-api-key>
@@ -167,7 +169,8 @@ TODO: pass callback for writing."
 (defun oai-expand-block (&optional element)
   "Show a temp buffer with what the ai block expands to.
 This is what will be sent to the api.  ELEMENT is the ai block.
-Like `org-babel-expand-src-block'."
+Like `org-babel-expand-src-block'.
+Set `help-window-select' variable to get focus."
   (interactive)
   (let* ((element (or element (oai-block-p))) ; oai-block.el
          (expanded (string-trim
@@ -179,7 +182,8 @@ Like `org-babel-expand-src-block'."
     (if (called-interactively-p 'any)
         (let ((buf (get-buffer-create "*OAi Preview*")))
           (with-help-window buf (with-current-buffer buf
-                                  (insert expanded))))
+                                  (insert expanded)))
+          (switch-to-buffer buf))
       expanded)))
 
 ;;; -=-= key C-g: keyboard quit
@@ -251,12 +255,13 @@ It's designed to \"do the right thing\":
 (let ((map oai-mode-map))
   ;; (define-key map (kbd "C-c M-a v") 'org-ai-image-variation) ; org-ai-openai-image.el
   ;; (define-key map (kbd "C-c M-a $") 'org-ai-open-account-usage-page) ; org-ai-openai-image.el
-  (define-key map (kbd "C-c h") #'oai-mark-region-at-point) ; oai-block.el
+  (define-key map (kbd "C-c h")	#'oai-mark-region-at-point) ; oai-block.el
   ;; (define-key map (kbd "C-c DEL") 'org-ai-kill-region-at-point) ; oai-block.el
   (define-key map (kbd "C-c <backspace>") #'oai-kill-region-at-point) ; oai-block.el
   ;; (define-key map (kbd (string-join (list "C-c" " r"))) 'org-ai-talk-capture-in-org) ; org-ai-talk.el
-  (define-key map (kbd "C-c ?") #'oai-open-request-buffer) ; oai-restapi.el
-  (define-key map (kbd "M-h") #'oai-block-mark-md-block-body) ; oai-block.el
+  (define-key map (kbd "M-h")		#'oai-block-mark-md-block-body) ; oai-block.el
+  (define-key map (kbd "C-c C-?")	#'oai-open-request-buffer) ; oai-restapi.el
+  (define-key map (kbd "C-c ?")	#'oai-expand-block)
   )
 
 (define-minor-mode oai-mode
