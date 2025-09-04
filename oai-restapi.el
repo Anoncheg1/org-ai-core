@@ -3,21 +3,25 @@
 ;; Copyright (C) 2023-2025 Robert Krahn
 ;; Copyright (C) 2025 github.com/Anoncheg1
 
-;; This file is NOT part of GNU Emacs.
+;;; License
 
-;; oai-restapi.el is free software: you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
+;; This file is not part of GNU Emacs.
+
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU Affero General Public License as published by
 ;; the Free Software Foundation, either version 3 of the License, or
 ;; (at your option) any later version.
 
-;; oai-restapi.el is distributed in the hope that it will be useful,
+;; This program is distributed in the hope that it will be useful,
 ;; but WITHOUT ANY WARRANTY; without even the implied warranty of
 ;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
+;; GNU Affero General Public License for more details.
 
-;; You should have received a copy of the GNU General Public License
-;; along with oai.el.
-;; If not, see <https://www.gnu.org/licenses/>.
+;; You should have received a copy of the GNU Affero General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+;; Licensed under the GNU Affero General Public License, version 3 (AGPLv3)
+;; <https://www.gnu.org/licenses/agpl-3.0.en.html>
 
 ;;; Changelog:
 ;; - DONE: comment redundent "org-ai-use-auth-source" variable
@@ -1163,7 +1167,7 @@ Call callback with nil or result of `oai-restapi--normalize-response' of respons
 (make-variable-buffer-local 'oai-restapi-request-llm-retries-local-url-buffer)
 
 (cl-defun oai-restapi-request-llm-retries (service model timeout callback &optional &key retries prompt messages header-marker max-tokens temperature top-p frequency-penalty presence-penalty)
-  "Add TIMEOUT and RETRIES parameters to `oai-restapi-request-llm' functiion.
+  "Add TIMEOUT and RETRIES parameters to `oai-restapi-request-llm' function.
 Timer function restart requst and restart timer with attempts-1.
 In callback we add cancel timer function.
 We save and cancel time only in callback.
@@ -1255,7 +1259,7 @@ TIMER is time to wait for one request."
                                           :presence-penalty presence-penalty))
             ;; save url-buffer
             (oai-timers--set oai-restapi-request-llm-retries-local-url-buffer
-                                header-marker)
+                             header-marker)
             (oai--debug "oai-restapi-request-llm-retries3" oai-timers--element-marker-variable-dict oai-restapi-request-llm-retries-local-url-buffer)
             )))))
 
@@ -1264,8 +1268,7 @@ TIMER is time to wait for one request."
 `REQUEST-BUFFER' is the buffer containing the request.
 Return t if error happen, otherwise nil"
   (oai--debug "oai-restapi--maybe-show-openai-request-error1")
-  (when (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)
-    (goto-char url-http-end-of-headers))
+
 
   (let ((http-code (url-http-symbol-value-in-buffer 'url-http-response-status (current-buffer))) ;; integer
         (http-data (if (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)
@@ -1281,22 +1284,25 @@ Return t if error happen, otherwise nil"
                                                                   (line-end-position)))))
     (oai--debug "oai-restapi--maybe-show-openai-request-error2 %s %s" http-code http-data)
     (or
-     (condition-case nil
-         (when-let* ((body (json-read))
-                     (err (or (alist-get 'error body)
-                              (plist-get body 'error)))
-                     (message (or (alist-get 'message err)
-                                  (plist-get err 'message)))
-                     (message (if (and message (not (string-blank-p message)))
-                                  message
-                                (json-encode err))))
-           (if oai-restapi-show-error-in-result
-                 (oai-restapi-insert-result-error (concat (format "%s\n" http-header-first-line)
-                                                          "Error from the service API:\n\t" message) (current-buffer))
-             ;; else
-             (oai-restapi--show-error message))
-           )
-       (error nil))
+     (when (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)
+           (goto-char url-http-end-of-headers)
+           (condition-case nil
+
+               (when-let* ((body (json-read))
+                           (err (or (alist-get 'error body)
+                                    (plist-get body 'error)))
+                           (message (or (alist-get 'message err)
+                                        (plist-get err 'message)))
+                           (message (if (and message (not (string-blank-p message)))
+                                        message
+                                      (json-encode err))))
+                 (if oai-restapi-show-error-in-result
+                     (oai-restapi-insert-result-error (concat (format "%s\n" http-header-first-line)
+                                                              "Error from the service API:\n\t" message) (current-buffer))
+                   ;; else
+                   (oai-restapi--show-error message))
+                 )
+             (error nil)))
      (when (and http-code (/= http-code 200))
        (if oai-restapi-show-error-in-result
            (oai-restapi-insert-result-error (format "HTTP Error from the service: %s %s \n %s" http-code http-data http-header-first-line) (current-buffer))
@@ -1501,7 +1507,7 @@ Called within url-retrieve buffer."
 ;;   (org-ai--progress-reporter-global-cancel (current-buffer))
 ;;   )
 
-;;; -=-= Reporter & requests interrupt functions
+;;; -=-= Reporter & Requests interrupt functions
 ;; 1) `oai-timers--progress-reporter-run' - start global timer
 ;; 2) `oai-timers--interrupt-current-request' - interrupt, called to stop tracking on-changes or kill buffer
 ;; When  we kill  one buffer  and if  no others  we report  failure or

@@ -1,6 +1,7 @@
 ; -*- lexical-binding: t -*-
 (require 'ert)             ; Testing framework
 (require 'oai-block)
+(require 'oai-block-tags)
 
 ;; (eval-buffer) or (load-file "path/to/async-tests.el")
 ;; Running Tests: Load the test file and run:

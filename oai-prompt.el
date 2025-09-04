@@ -2,21 +2,25 @@
 
 ;; Copyright (C) 2025 github.com/Anoncheg1
 
-;; This file is NOT part of GNU Emacs.
+;;; License
 
-;; oai-prompt.el is free software: you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
+;; This file is not part of GNU Emacs.
+
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU Affero General Public License as published by
 ;; the Free Software Foundation, either version 3 of the License, or
 ;; (at your option) any later version.
 
-;; oai-prompt.el is distributed in the hope that it will be useful,
+;; This program is distributed in the hope that it will be useful,
 ;; but WITHOUT ANY WARRANTY; without even the implied warranty of
 ;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
+;; GNU Affero General Public License for more details.
 
-;; You should have received a copy of the GNU General Public License
-;; along with oai-prompt.el.
-;; If not, see <https://www.gnu.org/licenses/>.
+;; You should have received a copy of the GNU Affero General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+;; Licensed under the GNU Affero General Public License, version 3 (AGPLv3)
+;; <https://www.gnu.org/licenses/agpl-3.0.en.html>
 
 ;;; Changelog
 
@@ -45,7 +49,7 @@
 ;;; -=-= all
 (require 'oai-block)
 (require 'oai-restapi)
-(require 'async)
+(require 'oai-async1)
 (require 'oai-timers)
 
 
@@ -134,6 +138,8 @@ answers except of the first one are already in block-content."
             (list :role 'assistant :content "IDK.")))))
 
 
+(alist-get :my '((:my . nil)) 'x)
+
 
 
 (defun oai-prompt-request-chain (req-type element sys-prompt sys-prompt-for-all-messages model max-tokens top-p temperature frequency-penalty presence-penalty service stream)
@@ -143,7 +149,7 @@ Aspects:
 2) error handling: kill reporter, kill tmp buffer, kill timers"
   (oai--debug "oai-prompt-agent-request-prepare1 service, model: %s %s" service model)
 
-  (if (string-equal (alist-get :pag (oai-block-get-info element)) "my")
+  (if (not (eql 'x (alist-get :my (oai-block-get-info element) 'x))) ; check if :my exist
       ;; - My request
       (let ((service (or service 'github))
             (end-marker (oai-block--get-content-end-marker element))
@@ -171,6 +177,7 @@ Aspects:
                     (lambda (data callback)
                       (oai--debug "oai-prompt-agent-request-prepare-call step %s" step)
                       (oai--debug "oai-prompt-agent-request-prepare-call max-tokens %s header-marker %s sys-prompt %s" max-tokens header-marker sys-prompt )
+                      ;; also save request for timer
                       (oai-restapi-request-llm-retries service
                                                       model
                                                       oai-timers-duration
@@ -191,7 +198,7 @@ Aspects:
 
         (oai--debug "oai-prompt-agent-request-prepare2 %s %s %s %s" header-marker service model oai-timers-duration)
         ;;
-        (start-async-chain nil
+        (oai-async1-start nil
                            (list (funcall call 0)
                                  callbackmy
                                  (funcall call 1)
@@ -201,7 +208,9 @@ Aspects:
                                  ))
           ;; Global reporter uppdated and run all the time.
           ;; Every task have own timer for parallel requests to retry them.
+          ;; 1) save request for timer
           (oai-timers--set buffer-key header-marker)
+          ;; 2) run global reporter
           (oai-timers--progress-reporter-run #'oai-restapi--stop-tracking-url-request (* oai-timers-duration 3) )))
 
       ;; - else - built-in
